@@ -68,7 +68,13 @@ The x86_64 emulator needs CPU virtualization. Initially it was off; it is now en
 - [x] Providers (`Provider` enum in `YoloDetector.kt`, "Switch provider" button): NNAPI fp16 (default), XNNPACK, NNAPI fp32; falls back to XNNPACK.
       Measured on the Poco (logcat tag `Inference`, ms/frame, XNNPACK / NNAPI / NNAPI fp16): n@640 157/244/160, s@640 398/358/223, s@480 219/232/165.
       NNAPI fp16 is ~1.75x faster for yolo11s; XNNPACK vs default CPU made no difference.
-- [ ] Judge detection accuracy under fp16 vs fp32; try INT8 quantization
+- [x] Provider button removed: NNAPI fp16 always, XNNPACK fallback. Default model `yolo11s`; `FpsMonitor` (unit tested) switches to `yolo11s_480`
+      when it averages < 3 FPS. Dev override: `adb shell am start ... --es model <name> --es provider <NNAPI_FP16|NNAPI|XNNPACK>`.
+- [x] INT8 (`yolo11s_int8.onnx`, via `tools/quantize_int8.py`, QDQ Conv-only, percentile calibration, opset 17): 89 ms/frame on NNAPI fp16
+      (vs 223 fp32); XNNPACK 398, NNAPI plain 506. Host check: 95% of fp32 detections reproduced. NNAPI compile takes ~20 s at model load.
+      Not yet the default (user to decide).
+- [ ] Ideas: reduce NNAPI partitions (11 partitions, 311/321 nodes supported: cut the DFL decode out of the graph), INT8 for 480/n, pipeline preprocessing,
+      MediaTek NeuroPilot/LiteRT delegate
 - Note: the 4 bundled models total ~124 MB in the repo (GitHub's limit is 100 MB per file, so still OK); consider Git LFS or pruning models.
 
 ## Model

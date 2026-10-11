@@ -33,11 +33,14 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        // Developer overrides, e.g. `am start ... --es model yolo11n --es provider XNNPACK`.
+        val model = intent.getStringExtra("model")
+        val provider = intent.getStringExtra("provider")?.let { name -> Provider.entries.firstOrNull { it.name == name } }
         setContent {
             MaterialTheme {
                 // Scaffold exposes the system bar insets as innerPadding; apply it to content.
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
-                    CameraPermissionGate(innerPadding)
+                    CameraPermissionGate(innerPadding, model, provider)
                 }
             }
         }
@@ -45,7 +48,11 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-fun CameraPermissionGate(contentPadding: PaddingValues = PaddingValues()) {
+fun CameraPermissionGate(
+    contentPadding: PaddingValues = PaddingValues(),
+    model: String? = null,
+    provider: Provider? = null,
+) {
     val context = LocalContext.current
     var granted by remember {
         mutableStateOf(
@@ -56,7 +63,11 @@ fun CameraPermissionGate(contentPadding: PaddingValues = PaddingValues()) {
     LaunchedEffect(Unit) { if (!granted) launcher.launch(Manifest.permission.CAMERA) }
 
     if (granted) {
-        CameraScreen(contentPadding)
+        CameraScreen(
+            contentPadding,
+            initialModel = model ?: "yolo11s",
+            initialProvider = provider ?: Provider.NNAPI_FP16,
+        )
     } else {
         Column(
             modifier = Modifier.fillMaxSize().padding(contentPadding).padding(24.dp),

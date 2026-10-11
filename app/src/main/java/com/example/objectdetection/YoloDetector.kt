@@ -14,7 +14,14 @@ import android.util.Log
 import java.nio.FloatBuffer
 import java.util.EnumSet
 
-data class DetectionResult(val detections: List<Detection>, val inferenceMs: Long)
+/** [inferenceMs] is the whole detect() call; the rest is its breakdown (preprocess / session run / decode+NMS). */
+data class DetectionResult(
+    val detections: List<Detection>,
+    val inferenceMs: Long,
+    val preprocessMs: Long = 0,
+    val runMs: Long = 0,
+    val postMs: Long = 0,
+)
 
 /** ONNX Runtime execution provider used to run the model. */
 enum class Provider(val label: String) {
@@ -81,18 +88,27 @@ class YoloDetector(
 
     /** [bitmap] must already be upright (rotation applied). Boxes are normalized to it. */
     fun detect(bitmap: Bitmap): DetectionResult {
-        val start = System.nanoTime()
+        val t0 = System.nanoTime()
         val letterbox = Letterbox(bitmap.width, bitmap.height, inputSize)
         preprocess(bitmap, letterbox)
+        val t1 = System.nanoTime()
 
         val shape = longArrayOf(1, 3, inputSize.toLong(), inputSize.toLong())
         OnnxTensor.createTensor(env, inputBuffer, shape).use { input ->
             session.run(mapOf(inputName to input)).use { result ->
+                val t2 = System.nanoTime()
                 val tensor = result[0] as OnnxTensor
                 val numAnchors = tensor.info.shape[2].toInt()
                 val raw = FloatArray(tensor.floatBuffer.remaining()).also { tensor.floatBuffer.get(it) }
                 val detections = YoloPostProcessor.decode(raw, numAnchors, letterbox)
-                return DetectionResult(detections, (System.nanoTime() - start) / 1_000_000)
+                val t3 = System.nanoTime()
+                return DetectionResult(
+                    detections,
+                    inferenceMs = (t3 - t0) / 1_000_000,
+                    preprocessMs = (t1 - t0) / 1_000_000,
+                    runMs = (t2 - t1) / 1_000_000,
+                    postMs = (t3 - t2) / 1_000_000,
+                )
             }
         }
     }

@@ -5,7 +5,8 @@ Real-time object detection on an Android phone. The camera feed goes through a
 [ONNX Runtime Mobile](https://onnxruntime.ai/docs/get-started/with-android.html) (NNAPI with FP16 by default, falling back to the XNNPACK CPU provider),
 and the detected boxes, labels and confidences are drawn over the live preview.
 
-- Bundled models, switchable in the app: **YOLO11n** (fast) and **YOLO11s** at 640 and 480 input sizes (more accurate, slower; smaller input = faster)
+- Bundled models, switchable in the app: **YOLO11s** (default, more accurate), its **INT8-quantized** version (about 2.5x faster on NNAPI), **YOLO11s at 480** and **YOLO11n** (smaller and faster)
+- If the default model runs below 3 FPS (e.g. on a slower phone), the app switches itself to the 480 model
 - 80 COCO classes (person, car, bottle, laptop, ...)
 - Kotlin + Jetpack Compose + CameraX, no network access needed at runtime
 - Tested on a Poco X7 Pro (Android 15 / HyperOS)
@@ -70,9 +71,19 @@ You can also open the folder in Android Studio and press Run.
 1. Launch **objectdetection** on the phone and allow the **Camera** permission.
 2. Point the camera at objects. Each detection is drawn as a coloured box with `label confidence%`.
 3. The top-left text shows `model · number of objects · inference time (ms)`.
-4. Tap **Switch model** to cycle through the bundled models (`yolo11n`, `yolo11s`, `yolo11s_480`) and **Switch provider** to cycle
-   through `NNAPI fp16` (default), `XNNPACK` and `NNAPI` (fp32). Compare speed and accuracy on the same scene.
-   The top line shows the provider actually in use; if NNAPI cannot load the model it falls back to XNNPACK.
+4. Tap **Switch model** to cycle through the bundled models (`yolo11s`, `yolo11s_int8`, `yolo11s_480`, `yolo11n`) and compare speed and accuracy on the same scene.
+5. The app runs the model with NNAPI (FP16 allowed). If NNAPI cannot load it, it falls back to the XNNPACK CPU provider; the top line shows
+   the provider actually in use. If the default `yolo11s` averages below 3 FPS, the app switches to `yolo11s_480` and shows `(auto: <3 FPS)`.
+6. **The first start takes a while** (about 20 s for the INT8 model, "Loading ..." is shown): NNAPI compiles the model for the phone's AI hardware
+   every time a model is loaded, including after switching models.
+
+Developer overrides (no UI): choose the model and execution provider from the command line, e.g. to benchmark:
+
+```powershell
+adb shell am start -n com.example.objectdetection/.MainActivity --es model yolo11s_int8 --es provider XNNPACK
+# provider: NNAPI_FP16 (default) | NNAPI | XNNPACK ; model: any file name in app/src/main/assets without .onnx
+adb logcat -s Inference:D     # per-frame time, split into preprocess / run / post
+```
 
 Detections below 25% confidence are hidden, and overlapping boxes of the same class are merged (NMS, IoU 0.45).
 Both thresholds are defaults of `YoloPostProcessor.decode`.
@@ -115,6 +126,23 @@ To add or replace a model:
 A custom-trained model with a different number of classes needs the class names in `CocoLabels.kt`
 and `YoloPostProcessor.NUM_CLASSES` updated.
 
+### INT8 quantization
+
+`yolo11s_int8.onnx` was made with static post-training quantization (QDQ format, per-channel weights, 99.99th-percentile calibration on
+32 COCO val2017 images). Only the Conv layers are quantized; the final classification/box convolutions and the DFL decode stay in float.
+The model is 10 MB instead of 36 MB.
+
+```powershell
+# calibration images: any folder of ~40 .jpg files (the last 8 are held out for the accuracy check)
+uv run --python 3.12 --with onnx --with onnxruntime --with pillow --with numpy python -I tools/quantize_int8.py `
+  app/src/main/assets/yolo11s.onnx yolo11s_int8.onnx 640 percentile path/to/images
+uv run --python 3.12 --with onnx --with onnxruntime --with pillow --with numpy python -I tools/eval_quantized.py `
+  app/src/main/assets/yolo11s.onnx yolo11s_int8.onnx 640 path/to/images
+```
+
+On 8 held-out images the INT8 model reproduced 95% of the fp32 detections (with no extra false ones); calibrating with min/max instead of
+percentile gave 93%. The script converts the model to opset 17 first, because per-channel quantization needs opset 13+.
+
 ## Performance
 
 Measured on a Poco X7 Pro (Dimensity 8400-Ultra). Times are milliseconds per frame (preprocessing + inference + decoding),
@@ -125,8 +153,12 @@ averaged over 17-240 frames per cell:
 | `yolo11n` | 640 | 10 MB | 157 | 244 | 160 |
 | `yolo11s` | 640 | 36 MB | 398 | 358 | **223** (~4.5 FPS) |
 | `yolo11s_480` | 480 | 36 MB | 219 | 232 | **165** (~6 FPS) |
+| `yolo11s_int8` | 640 | 10 MB | 398 | 506 | **89** (~11 FPS) |
 
 - NNAPI with FP16 is the fastest option for the larger models (about 1.75x faster than XNNPACK for `yolo11s`). For `yolo11n` it makes no difference.
+- INT8 only pays off on NNAPI with the FP16 flag, where it runs on the phone's AI accelerator (2.5x faster than the fp32 model there). On the CPU
+  (XNNPACK) INT8 is no faster than fp32, and plain NNAPI (without the FP16 flag) is slower.
+- Of the 89 ms for `yolo11s_int8`, preprocessing is ~4 ms and decoding/NMS ~7 ms; the model run itself is ~78 ms.
 - NNAPI in fp32 is not worth it: it is slower than XNNPACK for the small model.
 - FP16 can change confidences slightly compared with fp32; judge accuracy visually in the app.
 - Time scales with the number of input pixels, so a smaller input is the next most effective speed-up. The cost is accuracy on small objects.

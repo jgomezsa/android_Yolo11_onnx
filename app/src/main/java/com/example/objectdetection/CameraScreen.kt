@@ -12,9 +12,7 @@ import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -44,11 +42,23 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.min
 
-/** ONNX models bundled in assets (without the `.onnx` extension). */
-private val MODELS = listOf("yolo11n", "yolo11s", "yolo11s_480")
+/** ONNX models bundled in assets (without the `.onnx` extension). The first one is the default. */
+private val MODELS = listOf("yolo11s", "yolo11s_int8", "yolo11s_480", "yolo11n")
 
+/** Cheaper model to switch to automatically when the default one runs below [MIN_FPS]. */
+private val FALLBACK_MODEL = mapOf("yolo11s" to "yolo11s_480")
+private const val MIN_FPS = 3.0
+
+/**
+ * [initialModel] / [initialProvider] are developer overrides (launch extras `model` / `provider`):
+ * `adb shell am start -n com.example.objectdetection/.MainActivity --es model yolo11n --es provider XNNPACK`.
+ */
 @Composable
-fun CameraScreen(contentPadding: PaddingValues = PaddingValues()) {
+fun CameraScreen(
+    contentPadding: PaddingValues = PaddingValues(),
+    initialModel: String = MODELS.first(),
+    initialProvider: Provider = Provider.NNAPI_FP16,
+) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     var result by remember { mutableStateOf(DetectionResult(emptyList(), 0)) }
@@ -58,19 +68,19 @@ fun CameraScreen(contentPadding: PaddingValues = PaddingValues()) {
     val previewView = remember {
         PreviewView(context).apply { scaleType = PreviewView.ScaleType.FIT_CENTER }
     }
-    // The analyzer thread reloads the detector when the requested model or provider changes.
-    val requestedModel = remember { AtomicReference(MODELS.first()) }
-    val requestedProvider = remember { AtomicReference(Provider.NNAPI_FP16) }
-    var modelLabel by remember { mutableStateOf(MODELS.first()) }
-    var providerLabel by remember { mutableStateOf(Provider.NNAPI_FP16) }
-    // Provider actually in use (NNAPI may fall back to XNNPACK).
-    var activeProvider by remember { mutableStateOf(Provider.NNAPI_FP16) }
+    // The analyzer thread reloads the detector when the requested model changes.
+    val requestedModel = remember { AtomicReference(initialModel) }
+    var modelLabel by remember { mutableStateOf(initialModel) }
+    var autoFallback by remember { mutableStateOf(false) }
+    var loading by remember { mutableStateOf(true) }
+    // Provider actually in use (NNAPI falls back to XNNPACK if the model cannot be loaded with it).
+    var activeProvider by remember { mutableStateOf(initialProvider) }
 
     DisposableEffect(lifecycleOwner) {
         val executor = Executors.newSingleThreadExecutor()
+        val fpsMonitor = FpsMonitor(MIN_FPS)
         var detector: YoloDetector? = null
         var loadedModel = ""
-        var loadedProvider: Provider? = null
         val providerFuture = ProcessCameraProvider.getInstance(context)
         providerFuture.addListener({
             val provider = providerFuture.get()
@@ -86,24 +96,42 @@ fun CameraScreen(contentPadding: PaddingValues = PaddingValues()) {
                 .build()
             analysis.setAnalyzer(executor) { image ->
                 image.use {
+                    val frameStart = System.nanoTime()
                     val raw = it.toBitmap()
                     val upright = if (it.imageInfo.rotationDegrees == 0) raw else {
                         val m = Matrix().apply { postRotate(it.imageInfo.rotationDegrees.toFloat()) }
                         Bitmap.createBitmap(raw, 0, 0, raw.width, raw.height, m, true)
                     }
                     val wanted = requestedModel.get()
-                    val wantedProvider = requestedProvider.get()
-                    if (wanted != loadedModel || wantedProvider != loadedProvider) {
+                    if (wanted != loadedModel) {
+                        // NNAPI compiles the model on creation, which can take many seconds.
+                        loading = true
+                        val loadStart = System.nanoTime()
                         detector?.close()
-                        detector = YoloDetector(context, "$wanted.onnx", wantedProvider)
+                        detector = YoloDetector(context, "$wanted.onnx", initialProvider)
                         loadedModel = wanted
-                        loadedProvider = wantedProvider
                         activeProvider = detector!!.provider
+                        fpsMonitor.reset()
+                        loading = false
+                        Log.d("Inference", "loaded $wanted ${activeProvider.name} in ${(System.nanoTime() - loadStart) / 1_000_000} ms")
                     }
                     val r = detector!!.detect(upright)
-                    Log.d("Inference", "$loadedModel ${activeProvider.name} ${r.inferenceMs} ms")
+                    val frameMs = (System.nanoTime() - frameStart) / 1_000_000
+                    Log.d(
+                        "Inference",
+                        "$loadedModel ${activeProvider.name} ${r.inferenceMs} ms " +
+                            "(pre ${r.preprocessMs}, run ${r.runMs}, post ${r.postMs}) frame $frameMs ms",
+                    )
                     frameAspect = upright.width.toFloat() / upright.height
                     result = r
+                    // Too slow on the default model: drop to the cheaper one (once, only downwards).
+                    val fallback = FALLBACK_MODEL[loadedModel]
+                    if (fallback != null && fpsMonitor.record(frameMs)) {
+                        Log.w("Inference", "$loadedModel below $MIN_FPS FPS, switching to $fallback")
+                        requestedModel.set(fallback)
+                        modelLabel = fallback
+                        autoFallback = true
+                    }
                 }
             }
             provider.unbindAll()
@@ -122,27 +150,22 @@ fun CameraScreen(contentPadding: PaddingValues = PaddingValues()) {
         AndroidView(factory = { previewView }, modifier = Modifier.fillMaxSize())
         DetectionOverlay(result.detections, frameAspect, Modifier.fillMaxSize())
         Text(
-            text = "$modelLabel · ${activeProvider.label} · ${result.detections.size} objects · ${result.inferenceMs} ms",
+            text = if (loading) "Loading $modelLabel… (the first start can take ~20 s)" else
+                "$modelLabel${if (autoFallback) " (auto: <${MIN_FPS.toInt()} FPS)" else ""} · ${activeProvider.label} · " +
+                    "${result.detections.size} objects · ${result.inferenceMs} ms",
             color = Color.White,
             style = MaterialTheme.typography.titleMedium,
             modifier = Modifier.align(Alignment.TopStart).padding(8.dp),
         )
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-            modifier = Modifier.align(Alignment.BottomCenter).padding(16.dp),
-        ) {
-            Button(onClick = {
+        Button(
+            onClick = {
                 val next = MODELS[(MODELS.indexOf(modelLabel) + 1) % MODELS.size]
                 modelLabel = next
+                autoFallback = false
                 requestedModel.set(next)
-            }) { Text("Switch model") }
-            Button(onClick = {
-                val all = Provider.entries
-                val next = all[(all.indexOf(providerLabel) + 1) % all.size]
-                providerLabel = next
-                requestedProvider.set(next)
-            }) { Text("Switch provider") }
-        }
+            },
+            modifier = Modifier.align(Alignment.BottomCenter).padding(16.dp),
+        ) { Text("Switch model") }
     }
 }
 
