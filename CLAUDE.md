@@ -56,30 +56,22 @@ The x86_64 emulator needs CPU virtualization. Initially it was off; it is now en
 
 ## Status
 - [x] Project copied from the Hello World template, renamed (package, app name, project name)
-- [x] Model/runtime chosen: YOLO11n in ONNX format + ONNX Runtime Mobile (`onnxruntime-android`, CPU, 4 threads)
-- [x] Camera access (CameraX 1.4.0 + runtime CAMERA permission, `MainActivity.kt`)
-- [x] Inference on camera frames + box/label overlay (`CameraScreen.kt`, `YoloDetector.kt`, `YoloPostProcessor.kt`); unit tests pass
-- [x] Verified on the physical phone (Poco X7 Pro, HyperOS) on 2026-10-12: boxes align with the preview, detects tv/book/remote;
-      ~127 ms per frame (~8 FPS) on CPU with 4 threads. If `installDebug` gives INSTALL_FAILED_USER_RESTRICTED, enable
-      Developer options > "Install via USB" and accept the prompt on the phone.
-- [x] YOLO11s added (`yolo11s.onnx`, 36 MB) with an in-app "Switch model" button (`MODELS` in `CameraScreen.kt`).
-      Poco X7 Pro, CPU 4 threads: 11n ~130-170 ms, 11s ~350 ms per frame.
-- [x] Input size is read from the model; added `yolo11s_480` (`yolo11s_384` was tried and discarded).
-- [x] Providers (`Provider` enum in `YoloDetector.kt`, "Switch provider" button): NNAPI fp16 (default), XNNPACK, NNAPI fp32; falls back to XNNPACK.
-      Measured on the Poco (logcat tag `Inference`, ms/frame, XNNPACK / NNAPI / NNAPI fp16): n@640 157/244/160, s@640 398/358/223, s@480 219/232/165.
-      NNAPI fp16 is ~1.75x faster for yolo11s; XNNPACK vs default CPU made no difference.
-- [x] Provider button removed: NNAPI fp16 always, XNNPACK fallback. Default model `yolo11s`; `FpsMonitor` (unit tested) switches to `yolo11s_480`
-      when it averages < 3 FPS. Dev override: `adb shell am start ... --es model <name> --es provider <NNAPI_FP16|NNAPI|XNNPACK>`.
-- [x] INT8 (`yolo11s_int8.onnx`, via `tools/quantize_int8.py`, QDQ Conv-only, percentile calibration, opset 17): 89 ms/frame on NNAPI fp16
-      (vs 223 fp32); XNNPACK 398, NNAPI plain 506. Host check: 95% of fp32 detections reproduced. NNAPI compile takes ~20 s at model load.
-      Not yet the default (user to decide).
-- [ ] Ideas: reduce NNAPI partitions (11 partitions, 311/321 nodes supported: cut the DFL decode out of the graph), INT8 for 480/n, pipeline preprocessing,
-      MediaTek NeuroPilot/LiteRT delegate
-- Note: the 4 bundled models total ~124 MB in the repo (GitHub's limit is 100 MB per file, so still OK); consider Git LFS or pruning models.
+- [x] Camera (CameraX 1.4.0 + CAMERA permission), inference on frames, box/label overlay; verified on the Poco X7 Pro (HyperOS) on 2026-10-12.
+      If `installDebug` gives INSTALL_FAILED_USER_RESTRICTED: Developer options > "Install via USB", accept the prompt on the phone.
+- [x] Backend: **LiteRT 2.3.0 on the GPU** (`LiteRtDetector.kt`, `yolo11s.tflite`, fp16, compiled-program cache in cacheDir). Default model `yolo11s`;
+      `FpsMonitor` (unit tested) switches to `yolo11s_480` below 3 FPS. Fallback chain (`createDetector` in `CameraScreen.kt`): LiteRT GPU -> ORT NNAPI fp16 -> XNNPACK.
+      No model/provider buttons. Dev override: `adb shell am start ... --es model <name> --es provider <LITERT_GPU|NNAPI_FP16|NNAPI|XNNPACK>`.
+- [x] Measured on the Poco (ms/frame): LiteRT GPU s@640 74-97 (load 1.9-3.9 s cold, 0.2 s cached), s@480 53; ORT NNAPI fp16 s 223-245 (load 6 s);
+      NNAPI INT8 89-129 (load 19-29 s, unusable); XNNPACK s 398, n 157. Requirement from the user: load time must be < 5 s.
+- [x] Tried and dropped: yolo11s_384, cutting the DFL head out of the graph (no fewer NNAPI partitions), NNAPI INT8 as default (compile time).
+      MediaTek NeuroPilot via LiteRT: Dimensity 8400 not in the supported list (7300/8300/9000/9200/9300/9400) and needs AOT + Play packaging; not tried.
+- [ ] Ideas: pipeline preprocessing (~8 ms) with inference; INT8/fp16 TFLite for the GPU; skip the 4-core CPU preprocessing loop with a GPU/RenderScript-free resize.
+- Notes: LiteRT 2.3 needs `-Xskip-metadata-version-check` (built with a newer Kotlin than 2.0.21). The TFLite must have static shapes: convert with
+  `onnx2tf -tb tf_converter -b 1` (see README "Models"). Bundled models total ~170 MB (each file < 100 MB); consider pruning/Git LFS.
 
 ## Model
-- `app/src/main/assets/yolo11n.onnx` (10 MB), exported with:
-  `uv run --python 3.12 --with ultralytics --with onnx --with onnxslim --with onnxruntime yolo export model=yolo11n.pt format=onnx imgsz=640 opset=12 simplify=True`
+- ONNX models in `app/src/main/assets/` (and the `.tflite` GPU models converted from them, see README), exported with:
+  `uv run --python 3.12 --with ultralytics --with onnx --with onnxslim --with onnxruntime yolo export model=yolo11s.pt format=onnx imgsz=640 opset=12 simplify=True`
 - Input `[1,3,640,640]` RGB 0..1 (letterboxed, gray 114); output `[1,84,8400]` = cx,cy,w,h + 80 COCO class scores. Decoding + NMS in `YoloPostProcessor`.
 - Ultralytics YOLO is AGPL-3.0 (commercial use needs a license).
 

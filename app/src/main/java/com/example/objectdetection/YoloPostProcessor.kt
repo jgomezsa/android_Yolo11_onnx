@@ -51,14 +51,18 @@ object YoloPostProcessor {
             val cy = output[numAnchors + i]
             val w = output[2 * numAnchors + i]
             val h = output[3 * numAnchors + i]
-            // Model space -> source image space (undo padding and scale), then normalize.
-            val l = ((cx - w / 2 - letterbox.padX) / letterbox.scale / letterbox.srcWidth).coerceIn(0f, 1f)
-            val r = ((cx + w / 2 - letterbox.padX) / letterbox.scale / letterbox.srcWidth).coerceIn(0f, 1f)
-            val t = ((cy - h / 2 - letterbox.padY) / letterbox.scale / letterbox.srcHeight).coerceIn(0f, 1f)
-            val b = ((cy + h / 2 - letterbox.padY) / letterbox.scale / letterbox.srcHeight).coerceIn(0f, 1f)
-            if (r > l && b > t) candidates.add(Detection(l, t, r, b, best, bestScore))
+            toDetection(cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2, best, bestScore, letterbox)?.let(candidates::add)
         }
         return nms(candidates, iouThreshold)
+    }
+
+    /** Model-space corners -> normalized corners of the source image (undo padding and scale). */
+    private fun toDetection(l: Float, t: Float, r: Float, b: Float, classId: Int, score: Float, lb: Letterbox): Detection? {
+        val left = ((l - lb.padX) / lb.scale / lb.srcWidth).coerceIn(0f, 1f)
+        val right = ((r - lb.padX) / lb.scale / lb.srcWidth).coerceIn(0f, 1f)
+        val top = ((t - lb.padY) / lb.scale / lb.srcHeight).coerceIn(0f, 1f)
+        val bottom = ((b - lb.padY) / lb.scale / lb.srcHeight).coerceIn(0f, 1f)
+        return if (right > left && bottom > top) Detection(left, top, right, bottom, classId, score) else null
     }
 
     /** Class-aware non-maximum suppression. */

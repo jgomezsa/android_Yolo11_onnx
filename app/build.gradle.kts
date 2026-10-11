@@ -27,6 +27,8 @@ android {
     }
     kotlinOptions {
         jvmTarget = "17"
+        // LiteRT 2.3.0 is built with a newer Kotlin than 2.0.21; its public API is plain enough to read anyway.
+        freeCompilerArgs += "-Xskip-metadata-version-check"
     }
     buildFeatures {
         compose = true
@@ -48,6 +50,8 @@ dependencies {
     implementation("androidx.camera:camera-lifecycle:$cameraX")
     implementation("androidx.camera:camera-view:$cameraX")
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.20.0")
+    implementation("com.google.ai.edge.litert:litert:2.3.0")
+    implementation("com.google.ai.edge.litert:litert-gpu:2.3.0")
 
     testImplementation("junit:junit:4.13.2")
 }

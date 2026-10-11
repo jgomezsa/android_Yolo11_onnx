@@ -7,39 +7,20 @@ import ai.onnxruntime.TensorInfo
 import ai.onnxruntime.providers.NNAPIFlags
 import android.content.Context
 import android.graphics.Bitmap
-import android.graphics.Canvas
-import android.graphics.Color
-import android.graphics.Paint
 import android.util.Log
 import java.nio.FloatBuffer
 import java.util.EnumSet
-
-/** [inferenceMs] is the whole detect() call; the rest is its breakdown (preprocess / session run / decode+NMS). */
-data class DetectionResult(
-    val detections: List<Detection>,
-    val inferenceMs: Long,
-    val preprocessMs: Long = 0,
-    val runMs: Long = 0,
-    val postMs: Long = 0,
-)
-
-/** ONNX Runtime execution provider used to run the model. */
-enum class Provider(val label: String) {
-    XNNPACK("XNNPACK"),
-    NNAPI("NNAPI"),
-    NNAPI_FP16("NNAPI fp16"),
-}
 
 /** Runs a YOLO11 ONNX model with ONNX Runtime; falls back to XNNPACK, then plain CPU, if [requested] can't load. */
 class YoloDetector(
     context: Context,
     modelAsset: String = "yolo11n.onnx",
     private val requested: Provider = Provider.NNAPI_FP16,
-) : AutoCloseable {
+) : ObjectDetector {
     private val env = OrtEnvironment.getEnvironment()
 
     /** The provider actually in use (differs from [requested] after a fallback). */
-    var provider: Provider = requested
+    override var provider: Provider = requested
         private set
     private val session: OrtSession = createSession(context.assets.open(modelAsset).use { it.readBytes() })
     private val inputName: String = session.inputNames.first()
@@ -47,11 +28,8 @@ class YoloDetector(
     /** Square input side, read from the model (`[1, 3, size, size]`), so any exported size works. */
     private val inputSize: Int = session.inputInfo.getValue(inputName).info.let { (it as TensorInfo).shape[2].toInt() }
 
-    private val inputPixels = IntArray(inputSize * inputSize)
     private val inputBuffer = FloatBuffer.allocate(3 * inputSize * inputSize)
-    private val letterboxBitmap = Bitmap.createBitmap(inputSize, inputSize, Bitmap.Config.ARGB_8888)
-    private val letterboxCanvas = Canvas(letterboxBitmap)
-    private val bitmapPaint = Paint(Paint.FILTER_BITMAP_FLAG)
+    private val renderer = LetterboxRenderer(inputSize)
 
     private fun createSession(bytes: ByteArray): OrtSession {
         try {
@@ -83,11 +61,11 @@ class YoloDetector(
                 setIntraOpNumThreads(THREADS)
                 addNnapi(EnumSet.of(NNAPIFlags.USE_FP16))
             }
+            Provider.LITERT_GPU -> error("not an ONNX Runtime provider")
         }
     }
 
-    /** [bitmap] must already be upright (rotation applied). Boxes are normalized to it. */
-    fun detect(bitmap: Bitmap): DetectionResult {
+    override fun detect(bitmap: Bitmap): DetectionResult {
         val t0 = System.nanoTime()
         val letterbox = Letterbox(bitmap.width, bitmap.height, inputSize)
         preprocess(bitmap, letterbox)
@@ -97,10 +75,9 @@ class YoloDetector(
         OnnxTensor.createTensor(env, inputBuffer, shape).use { input ->
             session.run(mapOf(inputName to input)).use { result ->
                 val t2 = System.nanoTime()
-                val tensor = result[0] as OnnxTensor
-                val numAnchors = tensor.info.shape[2].toInt()
+                val tensor = result[0] as OnnxTensor // [1, 84, anchors] with boxes already decoded
                 val raw = FloatArray(tensor.floatBuffer.remaining()).also { tensor.floatBuffer.get(it) }
-                val detections = YoloPostProcessor.decode(raw, numAnchors, letterbox)
+                val detections = YoloPostProcessor.decode(raw, tensor.info.shape[2].toInt(), letterbox)
                 val t3 = System.nanoTime()
                 return DetectionResult(
                     detections,
@@ -114,18 +91,13 @@ class YoloDetector(
     }
 
     private fun preprocess(bitmap: Bitmap, lb: Letterbox) {
-        letterboxCanvas.drawColor(Color.rgb(114, 114, 114))
-        val w = lb.srcWidth * lb.scale
-        val h = lb.srcHeight * lb.scale
-        val dst = android.graphics.RectF(lb.padX, lb.padY, lb.padX + w, lb.padY + h)
-        letterboxCanvas.drawBitmap(bitmap, null, dst, bitmapPaint)
-        letterboxBitmap.getPixels(inputPixels, 0, inputSize, 0, 0, inputSize, inputSize)
+        val pixels = renderer.render(bitmap, lb)
 
         // HWC uint8 ARGB -> CHW float RGB in 0..1.
         val plane = inputSize * inputSize
         val out = inputBuffer.array()
         for (i in 0 until plane) {
-            val p = inputPixels[i]
+            val p = pixels[i]
             out[i] = ((p shr 16) and 0xFF) / 255f
             out[plane + i] = ((p shr 8) and 0xFF) / 255f
             out[2 * plane + i] = (p and 0xFF) / 255f

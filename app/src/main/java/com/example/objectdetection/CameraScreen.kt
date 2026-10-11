@@ -37,17 +37,32 @@ import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
-import androidx.compose.material3.Button
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.min
 
-/** ONNX models bundled in assets (without the `.onnx` extension). The first one is the default. */
-private val MODELS = listOf("yolo11s", "yolo11s_int8", "yolo11s_480", "yolo11n")
+/** Model used by default (asset name without extension: `yolo11s.onnx` / `yolo11s.tflite`). */
+const val DEFAULT_MODEL = "yolo11s"
 
 /** Cheaper model to switch to automatically when the default one runs below [MIN_FPS]. */
 private val FALLBACK_MODEL = mapOf("yolo11s" to "yolo11s_480")
 private const val MIN_FPS = 3.0
+
+/**
+ * Loads [model] with [provider]. Fallback chain when the preferred provider cannot run the model:
+ * LiteRT GPU (needs `$model.tflite`) -> ONNX Runtime NNAPI fp16 -> XNNPACK on the CPU.
+ */
+private fun createDetector(context: android.content.Context, model: String, provider: Provider): ObjectDetector {
+    if (provider == Provider.LITERT_GPU) {
+        try {
+            return LiteRtDetector(context, "$model.tflite")
+        } catch (e: Throwable) {
+            Log.w("Inference", "LiteRT GPU unavailable for $model, falling back to NNAPI", e)
+        }
+        return YoloDetector(context, "$model.onnx", Provider.NNAPI_FP16)
+    }
+    return YoloDetector(context, "$model.onnx", provider)
+}
 
 /**
  * [initialModel] / [initialProvider] are developer overrides (launch extras `model` / `provider`):
@@ -56,8 +71,8 @@ private const val MIN_FPS = 3.0
 @Composable
 fun CameraScreen(
     contentPadding: PaddingValues = PaddingValues(),
-    initialModel: String = MODELS.first(),
-    initialProvider: Provider = Provider.NNAPI_FP16,
+    initialModel: String = DEFAULT_MODEL,
+    initialProvider: Provider = Provider.LITERT_GPU,
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -79,7 +94,7 @@ fun CameraScreen(
     DisposableEffect(lifecycleOwner) {
         val executor = Executors.newSingleThreadExecutor()
         val fpsMonitor = FpsMonitor(MIN_FPS)
-        var detector: YoloDetector? = null
+        var detector: ObjectDetector? = null
         var loadedModel = ""
         val providerFuture = ProcessCameraProvider.getInstance(context)
         providerFuture.addListener({
@@ -104,11 +119,11 @@ fun CameraScreen(
                     }
                     val wanted = requestedModel.get()
                     if (wanted != loadedModel) {
-                        // NNAPI compiles the model on creation, which can take many seconds.
+                        // Accelerators compile the model on creation, which can take many seconds.
                         loading = true
                         val loadStart = System.nanoTime()
                         detector?.close()
-                        detector = YoloDetector(context, "$wanted.onnx", initialProvider)
+                        detector = createDetector(context, wanted, initialProvider)
                         loadedModel = wanted
                         activeProvider = detector!!.provider
                         fpsMonitor.reset()
@@ -150,22 +165,13 @@ fun CameraScreen(
         AndroidView(factory = { previewView }, modifier = Modifier.fillMaxSize())
         DetectionOverlay(result.detections, frameAspect, Modifier.fillMaxSize())
         Text(
-            text = if (loading) "Loading $modelLabel… (the first start can take ~20 s)" else
+            text = if (loading) "Loading $modelLabel…" else
                 "$modelLabel${if (autoFallback) " (auto: <${MIN_FPS.toInt()} FPS)" else ""} · ${activeProvider.label} · " +
                     "${result.detections.size} objects · ${result.inferenceMs} ms",
             color = Color.White,
             style = MaterialTheme.typography.titleMedium,
             modifier = Modifier.align(Alignment.TopStart).padding(8.dp),
         )
-        Button(
-            onClick = {
-                val next = MODELS[(MODELS.indexOf(modelLabel) + 1) % MODELS.size]
-                modelLabel = next
-                autoFallback = false
-                requestedModel.set(next)
-            },
-            modifier = Modifier.align(Alignment.BottomCenter).padding(16.dp),
-        ) { Text("Switch model") }
     }
 }
 

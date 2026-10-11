@@ -65,8 +65,8 @@ fun CameraPermissionGate(
     if (granted) {
         CameraScreen(
             contentPadding,
-            initialModel = model ?: "yolo11s",
-            initialProvider = provider ?: Provider.NNAPI_FP16,
+            initialModel = model ?: DEFAULT_MODEL,
+            initialProvider = provider ?: Provider.LITERT_GPU,
         )
     } else {
         Column(
