@@ -66,7 +66,7 @@ private fun createDetector(context: android.content.Context, model: String, prov
 
 /**
  * [initialModel] / [initialProvider] are developer overrides (launch extras `model` / `provider`):
- * `adb shell am start -n com.example.objectdetection/.MainActivity --es model yolo11n --es provider XNNPACK`.
+ * `adb shell am start -n com.example.objectdetection/.MainActivity --es model yolo11s_480 --es provider XNNPACK`.
  */
 @Composable
 fun CameraScreen(
@@ -85,17 +85,15 @@ fun CameraScreen(
     }
     // The analyzer thread reloads the detector when the requested model changes.
     val requestedModel = remember { AtomicReference(initialModel) }
-    var modelLabel by remember { mutableStateOf(initialModel) }
-    var autoFallback by remember { mutableStateOf(false) }
     var loading by remember { mutableStateOf(true) }
-    // Provider actually in use (NNAPI falls back to XNNPACK if the model cannot be loaded with it).
-    var activeProvider by remember { mutableStateOf(initialProvider) }
 
     DisposableEffect(lifecycleOwner) {
         val executor = Executors.newSingleThreadExecutor()
         val fpsMonitor = FpsMonitor(MIN_FPS)
         var detector: ObjectDetector? = null
         var loadedModel = ""
+        // Provider actually in use (a requested one may have fallen back); only logged, the user never sees it.
+        var activeProvider = initialProvider
         val providerFuture = ProcessCameraProvider.getInstance(context)
         providerFuture.addListener({
             val provider = providerFuture.get()
@@ -144,8 +142,6 @@ fun CameraScreen(
                     if (fallback != null && fpsMonitor.record(frameMs)) {
                         Log.w("Inference", "$loadedModel below $MIN_FPS FPS, switching to $fallback")
                         requestedModel.set(fallback)
-                        modelLabel = fallback
-                        autoFallback = true
                     }
                 }
             }
@@ -165,9 +161,7 @@ fun CameraScreen(
         AndroidView(factory = { previewView }, modifier = Modifier.fillMaxSize())
         DetectionOverlay(result.detections, frameAspect, Modifier.fillMaxSize())
         Text(
-            text = if (loading) "Loading $modelLabel…" else
-                "$modelLabel${if (autoFallback) " (auto: <${MIN_FPS.toInt()} FPS)" else ""} · ${activeProvider.label} · " +
-                    "${result.detections.size} objects · ${result.inferenceMs} ms",
+            text = if (loading) "Loading…" else "${result.inferenceMs} ms",
             color = Color.White,
             style = MaterialTheme.typography.titleMedium,
             modifier = Modifier.align(Alignment.TopStart).padding(8.dp),

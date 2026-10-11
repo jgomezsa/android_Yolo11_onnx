@@ -33,7 +33,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        // Developer overrides, e.g. `am start ... --es model yolo11n --es provider XNNPACK`.
+        // Developer overrides, e.g. `am start ... --es model yolo11s_480 --es provider XNNPACK`.
         val model = intent.getStringExtra("model")
         val provider = intent.getStringExtra("provider")?.let { name -> Provider.entries.firstOrNull { it.name == name } }
         setContent {

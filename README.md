@@ -1,16 +1,13 @@
-# Android YOLO11 Object Detection (GPU, LiteRT + ONNX Runtime)
+# Android Object Detection (YOLO11)
 
-Real-time object detection on an Android phone. The camera feed goes through a
-[YOLO11](https://docs.ultralytics.com/models/yolo11/) model, run on-device on the **phone's GPU** with
-[LiteRT](https://ai.google.dev/edge/litert) (the successor of TensorFlow Lite), and the detected boxes, labels and
-confidences are drawn over the live preview.
+Point your phone's camera at the world and the app draws a box and a label around every object it recognises,
+live, using an AI model that runs entirely **on the phone**. No internet connection and no server are needed, and
+no image ever leaves the device.
 
-- Default model: **YOLO11s** (small, accurate) at ~12 FPS on a Poco X7 Pro, with a **start-up under 4 s** (0.2 s once the GPU program is cached)
-- If the model runs below 3 FPS (e.g. on a slower phone), the app switches itself to a cheaper **YOLO11s at 480x480**
-- If the GPU cannot run the model, it falls back to ONNX Runtime with NNAPI (fp16), and then to the CPU (XNNPACK)
-- 80 COCO classes (person, car, bottle, laptop, ...)
-- Kotlin + Jetpack Compose + CameraX, no network access needed at runtime
-- Tested on a Poco X7 Pro (Dimensity 8400-Ultra, Android 15 / HyperOS)
+- Recognises the 80 everyday object classes of the COCO dataset (person, car, bottle, laptop, cat, ...)
+- Runs on the phone's **GPU**, so it stays smooth on a recent phone
+- Adapts to slower phones by itself
+- Kotlin, Jetpack Compose and CameraX; tested on a Poco X7 Pro (Android 15)
 
 ## What you need
 
@@ -20,7 +17,6 @@ confidences are drawn over the live preview.
 | JDK 17 | Set `JAVA_HOME`. Tested with Microsoft OpenJDK 17 |
 | Android SDK | `platform-tools`, `platforms;android-35`, `build-tools;35.0.0` (command-line tools are enough; Android Studio is optional) |
 | Git | To clone the repo |
-| Python + [uv](https://docs.astral.sh/uv/) | **Only** if you want to re-export or change the models |
 
 Gradle 8.9 is downloaded automatically by the wrapper (`gradlew`). The project was developed on Windows 11
 with PowerShell; on macOS/Linux use `./gradlew` instead of `.\gradlew.bat`.
@@ -69,124 +65,57 @@ You can also open the folder in Android Studio and press Run.
 
 ## Using the app
 
-1. Launch **objectdetection** on the phone and allow the **Camera** permission.
-2. Point the camera at objects. Each detection is drawn as a coloured box with `label confidence%`.
-3. The top-left text shows `model · provider · number of objects · inference time (ms)`.
-4. There is nothing to configure. The app runs `yolo11s` on the GPU. If it averages below 3 FPS over 10 frames it switches to `yolo11s_480`
-   and shows `(auto: <3 FPS)`. If the GPU cannot run the model, the top line shows the provider actually in use (`NNAPI fp16` or `XNNPACK`).
-5. The first start of a model compiles it for the GPU (about 2-4 s, "Loading ..." is shown). The compiled program is cached in the app's
-   cache directory, so later starts take ~0.2 s. Clearing the app's cache brings the one-time compile back.
+1. Open **Object Detection** and allow the **Camera** permission.
+2. Point the camera at objects. Each one gets a coloured box with its name and a confidence percentage.
+3. The number in the top-left corner is how long the last frame took to process, in milliseconds. The lower it is, the smoother the detection.
 
-Developer overrides (no UI): choose the model and execution provider from the command line, e.g. to benchmark:
-
-```powershell
-adb shell am start -n com.example.objectdetection/.MainActivity --es model yolo11n --es provider XNNPACK
-# provider: LITERT_GPU (default) | NNAPI_FP16 | NNAPI | XNNPACK
-# model: a file name in app/src/main/assets without the extension (.tflite for LITERT_GPU, .onnx for the others)
-adb logcat -s Inference:D     # per-frame time, split into preprocess / run / post, and the model load time
-```
-
-Detections below 25% confidence are hidden, and overlapping boxes of the same class are merged (NMS, IoU 0.45).
-Both thresholds are defaults of `YoloPostProcessor.decode`.
+There is nothing to configure: the app picks the best way to run on your phone by itself.
+The first start after installing takes a few seconds (the top-left corner says "Loading..."); later starts are almost instant.
 
 ## How it works
 
+Every camera frame goes through the same steps:
+
 ```
-CameraX ImageAnalysis (RGBA frame)
-  -> rotate upright -> letterbox to 640x640 (gray 114 padding) -> float RGB tensor
-  -> LiteRT on the GPU (OpenCL, fp16)  ->  output [1,84,8400]  (cx, cy, w, h + 80 class scores per anchor)
-  -> confidence filter + class-aware NMS -> boxes mapped back to the camera frame (normalized 0..1)
-  -> Compose Canvas overlay on top of the PreviewView
+Camera frame -> resize and pad to a square -> AI model on the GPU -> raw predictions
+             -> keep the confident ones, remove duplicates -> boxes drawn over the preview
 ```
+
+1. **Camera.** CameraX delivers two streams: the live preview you see, and a stream of frames for analysis. If the analysis falls behind it
+   simply skips frames, so the preview never lags.
+2. **Preparation.** The model expects a square 640x640 picture. The frame is rotated upright and scaled to fit inside the square, and the
+   unused space is filled with grey so nothing is stretched. The pixels are converted to numbers between 0 and 1.
+3. **The model.** It is [YOLO11](https://docs.ultralytics.com/models/yolo11/) "small", a neural network trained on the COCO dataset. In one pass it looks at the
+   whole picture and proposes 8,400 candidate boxes, each with a score for every one of the 80 classes. It runs through
+   [LiteRT](https://ai.google.dev/edge/litert) (Google's on-device runtime, the successor of TensorFlow Lite) on the phone's GPU.
+4. **Cleaning up the result** (`YoloPostProcessor`). Candidates scoring below 25% are dropped. Often several boxes cover the same object, so
+   the best one is kept and the others that overlap it by more than 45% are discarded (*non-maximum suppression*, applied per class).
+   The surviving boxes are mapped back from the padded square to the real camera picture.
+5. **Drawing.** The boxes and labels are painted on a Compose canvas laid over the camera preview.
+
+Some details that keep it fast and robust:
+
+- **GPU program cache.** Before the first run the GPU needs the model translated into programs for that specific chip, which takes a few seconds.
+  The result is saved in the app's cache folder, so every later start skips that step. If the model file changes, the cache key changes with it.
+- **Fallbacks.** If a phone's GPU cannot run the model, the app silently falls back to the phone's AI accelerator (through ONNX Runtime and NNAPI),
+  and if that fails too, to the CPU. The user never has to choose.
+- **Slow phones.** The app measures how many frames per second it really achieves. If the average drops below 3 frames per second it swaps in a
+  lighter version of the model that works on a smaller 480x480 picture, trading a little accuracy on small objects for speed.
+- **Everything is local.** The models are bundled inside the app; nothing is downloaded or uploaded.
+
+### Project layout
 
 | File | Role |
 |---|---|
-| `MainActivity.kt` | Edge-to-edge Compose host, camera permission request, developer launch extras |
-| `CameraScreen.kt` | CameraX preview + analysis, detector fallback chain, automatic switch to the cheaper model, box overlay |
-| `ObjectDetector.kt` | `ObjectDetector` interface, `Provider` enum, shared letterbox rendering |
-| `LiteRtDetector.kt` | LiteRT GPU backend (`.tflite` models) with the compiled-program cache |
-| `YoloDetector.kt` | ONNX Runtime backend (`.onnx` models): NNAPI fp16 / NNAPI / XNNPACK |
-| `YoloPostProcessor.kt` | Letterbox math, output decoding, NMS (pure Kotlin, unit tested) |
-| `FpsMonitor.kt` | Detects "average below 3 FPS" to trigger the cheaper model (pure Kotlin, unit tested) |
-| `CocoLabels.kt` | The 80 COCO class names |
-| `app/src/main/assets/` | The bundled models (`.tflite` for the GPU path, `.onnx` for the fallbacks) |
-| `tools/` | Model conversion/quantization scripts (see below) |
-
-## Models
-
-The models in `app/src/main/assets/` come from the pretrained Ultralytics weights (COCO). `yolo11s.tflite` / `yolo11s_480.tflite` run on the
-GPU; the `.onnx` files (`yolo11s`, `yolo11s_480`, `yolo11n`, `yolo11s_int8`) are for the ONNX Runtime fallbacks and for benchmarking.
-
-**1. Export to ONNX** (opset 12):
-
-```powershell
-uv run --python 3.12 --with ultralytics --with onnx --with onnxslim --with onnxruntime `
-  yolo export model=yolo11s.pt format=onnx imgsz=640 opset=12 simplify=True
-```
-
-**2. Convert the ONNX file to TFLite** for the GPU path. Ultralytics' own `format=litert` export only works on Linux/macOS, but `onnx2tf` runs on Windows:
-
-```powershell
-uv run --python 3.12 --with onnx2tf --with tensorflow --with tf_keras --with onnx --with onnxruntime --with onnxsim `
-  --with onnx_graphsurgeon --with sng4onnx --with ai_edge_litert --with psutil --with protobuf `
-  onnx2tf -i yolo11s.onnx -o out -tb tf_converter -b 1
-# use out/yolo11s_float32.tflite, saved in app/src/main/assets/ as yolo11s.tflite
-```
-
-Two details matter: use `-tb tf_converter -b 1` (the default `flatbuffer_direct` backend leaves hundreds of dynamic-shape tensors and the GPU
-delegate then fails with "Failed to compile model"), and use the **float32** file (the GPU computes in fp16 by itself; the float16 file has fp16 inputs).
-The input size is read from the model, so other sizes work too (export ONNX with e.g. `imgsz=480`).
-
-To add or replace a model, put the files in `app/src/main/assets/` and use its name (without extension) as `DEFAULT_MODEL` or in `FALLBACK_MODEL`
-in `CameraScreen.kt`. A custom-trained model with a different number of classes needs the class names in `CocoLabels.kt`
-and `YoloPostProcessor.NUM_CLASSES` updated.
-
-### INT8 quantization (ONNX Runtime experiment)
-
-`yolo11s_int8.onnx` was made with static post-training quantization (QDQ format, per-channel weights, 99.99th-percentile calibration on
-32 COCO val2017 images). Only the Conv layers are quantized; the final classification/box convolutions and the DFL decode stay in float.
-The model is 10 MB instead of 36 MB.
-
-```powershell
-# calibration images: any folder of ~40 .jpg files (the last 8 are held out for the accuracy check)
-uv run --python 3.12 --with onnx --with onnxruntime --with pillow --with numpy python -I tools/quantize_int8.py `
-  app/src/main/assets/yolo11s.onnx yolo11s_int8.onnx 640 percentile path/to/images
-uv run --python 3.12 --with onnx --with onnxruntime --with pillow --with numpy python -I tools/eval_quantized.py `
-  app/src/main/assets/yolo11s.onnx yolo11s_int8.onnx 640 path/to/images
-```
-
-On 8 held-out images the INT8 model reproduced 95% of the fp32 detections (with no extra false ones); calibrating with min/max instead of
-percentile gave 93%. The script converts the model to opset 17 first, because per-channel quantization needs opset 13+.
-
-## Performance
-
-Measured on a Poco X7 Pro (Dimensity 8400-Ultra). Times are milliseconds per frame (preprocessing + model + decoding), averaged over
-15-240 frames. "Load" is the time to create the model before the first frame:
-
-| Backend | Model | Load | ms / frame | ~FPS |
-|---|---|---|---|---|
-| **LiteRT GPU (default)** | `yolo11s` 640 | **1.9-3.9 s** first start, **0.2 s** cached | **74-97** | **10-13** |
-| LiteRT GPU | `yolo11s_480` | 1.9 s first start | 53 | 18 |
-| ONNX Runtime, NNAPI fp16 | `yolo11s` 640 | 6.1 s | 223-245 | 4 |
-| ONNX Runtime, NNAPI fp16 | `yolo11s_int8` | **19-29 s** | 89-129 | 8-11 |
-| ONNX Runtime, XNNPACK (CPU) | `yolo11s` 640 | 0.3 s | 398 | 2.5 |
-| ONNX Runtime, XNNPACK (CPU) | `yolo11s_480` | 0.3 s | 219 | 4.5 |
-| ONNX Runtime, XNNPACK (CPU) | `yolo11n` 640 | 0.3 s | 157 | 6 |
-
-What the measurements showed:
-
-- **The GPU through LiteRT is the best option here**: full-precision `yolo11s` (no quantization) runs ~3x faster than on NNAPI and ~5x faster than
-  on the CPU, and starts in seconds. NNAPI/ONNX Runtime has no real GPU backend: NNAPI sends the model to MediaTek's AI accelerator (APU), where the
-  compile step is long (6 s for fp32, 19-29 s for INT8) and is repeated on every start (ONNX Runtime cannot cache it).
-- **The CPU is not the bottleneck**: with XNNPACK the process uses ~3 cores for the model; with NNAPI or the GPU the whole app (camera, preprocessing,
-  decoding, UI) uses under 1 core.
-- INT8 only helps on NNAPI (fp16 flag); on the CPU it is no faster than fp32. The compile time makes it unusable as the default.
-- Cutting the YOLO head (DFL decoding) out of the graph to reduce NNAPI partitions made no difference: the 11 partitions of the fp32 model come
-  from other operators (Split, attention, Resize).
-- MediaTek's NeuroPilot NPU accelerator for LiteRT currently lists Dimensity 7300/8300/9000/9200/9300/9400, not the 8400, and needs ahead-of-time
-  compilation and Play packaging, so it was not tried.
-- Time scales with the number of input pixels, so a smaller input is a cheap extra speed-up. The cost is accuracy on small objects.
-- Numbers vary with scene, phone temperature and background load; treat them as ballparks. Every frame logs its time: `adb logcat -s Inference:D`.
+| `MainActivity.kt` | Edge-to-edge Compose host and the camera permission request |
+| `CameraScreen.kt` | CameraX preview and analysis, picks and falls back between detectors, draws the boxes |
+| `ObjectDetector.kt` | Common interface for the detectors, and the code that pads a frame into the square model input |
+| `LiteRtDetector.kt` | The GPU detector (LiteRT, `.tflite` models) with the program cache |
+| `YoloDetector.kt` | The fallback detector (ONNX Runtime, `.onnx` models) |
+| `YoloPostProcessor.kt` | Turns the model's raw output into boxes: thresholds, overlap removal, coordinate mapping (unit tested) |
+| `FpsMonitor.kt` | Decides when the phone is too slow and the lighter model is needed (unit tested) |
+| `CocoLabels.kt` | The 80 class names |
+| `app/src/main/assets/` | The bundled models: `yolo11s` and the lighter `yolo11s_480`, each in `.tflite` (GPU) and `.onnx` (fallback) form |
 
 ## Troubleshooting
 
@@ -194,16 +123,15 @@ What the measurements showed:
 |---|---|
 | `INSTALL_FAILED_USER_RESTRICTED` | Enable **Install via USB** in Developer options (Xiaomi/Poco/Redmi) and accept the prompt on the phone |
 | `adb devices` shows `unauthorized` or nothing | Re-plug the cable, accept the RSA prompt, set USB mode to File transfer |
-| Black screen from `adb shell screencap` | The phone is locked or the screen is off; unlock it |
 | `SDK location not found` | Create `local.properties` with `sdk.dir=...` |
-| Gradle `Couldn't delete ...\R.jar` (Windows) | Something locks build files, usually the VS Code Kotlin language server or a stray Gradle daemon. Run `.\gradlew.bat --stop`, close/kill `java.exe` processes, delete `app\build`, rebuild |
-| App crashes on start | `adb logcat -s AndroidRuntime:E` |
-| Top line says `NNAPI fp16` or `XNNPACK` instead of `LiteRT GPU` | The GPU path failed; see the reason with `adb logcat -s Inference:W`. A TFLite model with dynamic-shape tensors gives "Failed to compile model" (re-convert as described under Models) |
-| Build error `Module was compiled with an incompatible version of Kotlin` (LiteRT) | LiteRT 2.3 is built with a newer Kotlin than 2.0.21; `app/build.gradle.kts` sets `-Xskip-metadata-version-check` for it |
-| Emulator is slow or fails to start | `emulator -accel-check`; the emulator camera only shows a virtual scene, a real phone is recommended |
+| Gradle `Couldn't delete ...\R.jar` (Windows) | Something locks build files, usually an IDE language server or a stray Gradle daemon. Run `.\gradlew.bat --stop`, close the IDE, delete `app\build`, rebuild |
+| The app crashes on start | `adb logcat -s AndroidRuntime:E` |
 
-## License
+## License and commercial use
 
 The app code is provided as-is for experimentation. The bundled models are derived from
-[Ultralytics YOLO11](https://github.com/ultralytics/ultralytics), licensed under **AGPL-3.0**; commercial use
-requires an Ultralytics license or a different model.
+[Ultralytics YOLO11](https://github.com/ultralytics/ultralytics), which is licensed under the **AGPL-3.0**
+(or, alternatively, a paid Ultralytics Enterprise License). AGPL does not forbid commercial use, but anything that
+includes the YOLO11 code or weights must itself be released under the AGPL with its source made available to its users.
+To distribute a closed-source or commercial app you need an Ultralytics Enterprise License or a model with a permissive licence
+(for example RT-DETR or YOLOX, both Apache-2.0). Check the current terms before publishing; this is not legal advice.
