@@ -64,7 +64,10 @@ The x86_64 emulator needs CPU virtualization. Initially it was off; it is now en
       Developer options > "Install via USB" and accept the prompt on the phone.
 - [x] YOLO11s added (`yolo11s.onnx`, 36 MB) with an in-app "Switch model" button (`MODELS` in `CameraScreen.kt`).
       Poco X7 Pro, CPU 4 threads: 11n ~130-170 ms, 11s ~350 ms per frame.
-- [ ] Try NNAPI/XNNPACK providers, INT8 quantization, lower input size
+- [x] XNNPACK provider enabled (no real gain vs default CPU). Input size is read from the model; added `yolo11s_480` / `yolo11s_384`.
+      Measured (logcat tag `Inference`, 50-100 frames): n@640 ~130-160 ms, s@640 ~390 ms, s@480 ~250 ms, s@384 ~165 ms.
+- [ ] Try NNAPI, INT8/FP16 quantization; judge accuracy of s@384 vs n@640 side by side
+- Note: the 4 bundled models total ~124 MB in the repo (GitHub's limit is 100 MB per file, so still OK); consider Git LFS or pruning models.
 
 ## Model
 - `app/src/main/assets/yolo11n.onnx` (10 MB), exported with:

@@ -2,6 +2,7 @@ package com.example.objectdetection
 
 import android.graphics.Bitmap
 import android.graphics.Matrix
+import android.util.Log
 import androidx.camera.core.AspectRatio
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
@@ -42,7 +43,7 @@ import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.min
 
 /** ONNX models bundled in assets (without the `.onnx` extension). */
-private val MODELS = listOf("yolo11n", "yolo11s")
+private val MODELS = listOf("yolo11n", "yolo11s", "yolo11s_480", "yolo11s_384")
 
 @Composable
 fun CameraScreen(contentPadding: PaddingValues = PaddingValues()) {
@@ -90,6 +91,7 @@ fun CameraScreen(contentPadding: PaddingValues = PaddingValues()) {
                         loadedModel = wanted
                     }
                     val r = detector!!.detect(upright)
+                    Log.d("Inference", "$loadedModel ${r.inferenceMs} ms")
                     frameAspect = upright.width.toFloat() / upright.height
                     result = r
                 }
