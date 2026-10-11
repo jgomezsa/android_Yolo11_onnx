@@ -4,6 +4,7 @@ import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
 import ai.onnxruntime.TensorInfo
+import ai.onnxruntime.providers.NNAPIFlags
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
@@ -11,12 +12,28 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.util.Log
 import java.nio.FloatBuffer
+import java.util.EnumSet
 
 data class DetectionResult(val detections: List<Detection>, val inferenceMs: Long)
 
-/** Runs a YOLO11 ONNX model (640x640 input) with ONNX Runtime on the CPU, using the XNNPACK provider. */
-class YoloDetector(context: Context, modelAsset: String = "yolo11n.onnx") : AutoCloseable {
+/** ONNX Runtime execution provider used to run the model. */
+enum class Provider(val label: String) {
+    XNNPACK("XNNPACK"),
+    NNAPI("NNAPI"),
+    NNAPI_FP16("NNAPI fp16"),
+}
+
+/** Runs a YOLO11 ONNX model with ONNX Runtime; falls back to XNNPACK, then plain CPU, if [requested] can't load. */
+class YoloDetector(
+    context: Context,
+    modelAsset: String = "yolo11n.onnx",
+    private val requested: Provider = Provider.NNAPI_FP16,
+) : AutoCloseable {
     private val env = OrtEnvironment.getEnvironment()
+
+    /** The provider actually in use (differs from [requested] after a fallback). */
+    var provider: Provider = requested
+        private set
     private val session: OrtSession = createSession(context.assets.open(modelAsset).use { it.readBytes() })
     private val inputName: String = session.inputNames.first()
 
@@ -29,16 +46,37 @@ class YoloDetector(context: Context, modelAsset: String = "yolo11n.onnx") : Auto
     private val letterboxCanvas = Canvas(letterboxBitmap)
     private val bitmapPaint = Paint(Paint.FILTER_BITMAP_FLAG)
 
-    private fun createSession(bytes: ByteArray): OrtSession = try {
-        // XNNPACK kernels use their own thread pool; ORT's intra-op pool stays at 1 to avoid oversubscription.
-        val xnnpack = OrtSession.SessionOptions().apply {
-            setIntraOpNumThreads(1)
-            addXnnpack(mapOf("intra_op_num_threads" to THREADS.toString()))
+    private fun createSession(bytes: ByteArray): OrtSession {
+        try {
+            return env.createSession(bytes, options(requested))
+        } catch (e: Exception) {
+            Log.w(TAG, "$requested unavailable, falling back to XNNPACK", e)
         }
-        env.createSession(bytes, xnnpack)
-    } catch (e: Exception) {
-        Log.w(TAG, "XNNPACK unavailable, falling back to the default CPU provider", e)
-        env.createSession(bytes, OrtSession.SessionOptions().apply { setIntraOpNumThreads(THREADS) })
+        provider = Provider.XNNPACK
+        try {
+            return env.createSession(bytes, options(Provider.XNNPACK))
+        } catch (e: Exception) {
+            Log.w(TAG, "XNNPACK unavailable, falling back to the default CPU provider", e)
+        }
+        return env.createSession(bytes, OrtSession.SessionOptions().apply { setIntraOpNumThreads(THREADS) })
+    }
+
+    private fun options(p: Provider) = OrtSession.SessionOptions().apply {
+        when (p) {
+            Provider.XNNPACK -> {
+                // XNNPACK kernels use their own thread pool; ORT's intra-op pool stays at 1 to avoid oversubscription.
+                setIntraOpNumThreads(1)
+                addXnnpack(mapOf("intra_op_num_threads" to THREADS.toString()))
+            }
+            Provider.NNAPI -> {
+                setIntraOpNumThreads(THREADS) // threads for the operators NNAPI does not take
+                addNnapi()
+            }
+            Provider.NNAPI_FP16 -> {
+                setIntraOpNumThreads(THREADS)
+                addNnapi(EnumSet.of(NNAPIFlags.USE_FP16))
+            }
+        }
     }
 
     /** [bitmap] must already be upright (rotation applied). Boxes are normalized to it. */

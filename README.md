@@ -2,10 +2,10 @@
 
 Real-time object detection on an Android phone. The camera feed goes through a
 [YOLO11](https://docs.ultralytics.com/models/yolo11/) model in ONNX format, run on-device with
-[ONNX Runtime Mobile](https://onnxruntime.ai/docs/get-started/with-android.html) (CPU, XNNPACK provider),
+[ONNX Runtime Mobile](https://onnxruntime.ai/docs/get-started/with-android.html) (NNAPI with FP16 by default, falling back to the XNNPACK CPU provider),
 and the detected boxes, labels and confidences are drawn over the live preview.
 
-- Bundled models, switchable in the app: **YOLO11n** (fast) and **YOLO11s** at 640, 480 and 384 input sizes (more accurate, slower; smaller input = faster)
+- Bundled models, switchable in the app: **YOLO11n** (fast) and **YOLO11s** at 640 and 480 input sizes (more accurate, slower; smaller input = faster)
 - 80 COCO classes (person, car, bottle, laptop, ...)
 - Kotlin + Jetpack Compose + CameraX, no network access needed at runtime
 - Tested on a Poco X7 Pro (Android 15 / HyperOS)
@@ -70,7 +70,9 @@ You can also open the folder in Android Studio and press Run.
 1. Launch **objectdetection** on the phone and allow the **Camera** permission.
 2. Point the camera at objects. Each detection is drawn as a coloured box with `label confidence%`.
 3. The top-left text shows `model · number of objects · inference time (ms)`.
-4. Tap **Switch model** to cycle through the bundled models (`yolo11n`, `yolo11s`, `yolo11s_480`, `yolo11s_384`) and compare speed and accuracy on the same scene.
+4. Tap **Switch model** to cycle through the bundled models (`yolo11n`, `yolo11s`, `yolo11s_480`) and **Switch provider** to cycle
+   through `NNAPI fp16` (default), `XNNPACK` and `NNAPI` (fp32). Compare speed and accuracy on the same scene.
+   The top line shows the provider actually in use; if NNAPI cannot load the model it falls back to XNNPACK.
 
 Detections below 25% confidence are hidden, and overlapping boxes of the same class are merged (NMS, IoU 0.45).
 Both thresholds are defaults of `YoloPostProcessor.decode`.
@@ -80,7 +82,7 @@ Both thresholds are defaults of `YoloPostProcessor.decode`.
 ```
 CameraX ImageAnalysis (RGBA frame)
   -> rotate upright -> letterbox to 640x640 (gray 114 padding) -> float RGB CHW tensor [1,3,640,640]
-  -> ONNX Runtime (XNNPACK, 4 threads) -> output [1,84,8400]  (cx, cy, w, h + 80 class scores per anchor)
+  -> ONNX Runtime (NNAPI fp16, or XNNPACK on 4 threads) -> output [1,84,8400]  (cx, cy, w, h + 80 class scores per anchor)
   -> confidence filter + class-aware NMS -> boxes mapped back to the camera frame (normalized 0..1)
   -> Compose Canvas overlay on top of the PreviewView
 ```
@@ -115,18 +117,20 @@ and `YoloPostProcessor.NUM_CLASSES` updated.
 
 ## Performance
 
-Measured on a Poco X7 Pro (Dimensity 8400-Ultra), ONNX Runtime with the XNNPACK provider and 4 CPU threads.
-Times are per frame (preprocessing + inference + decoding), averaged over 50-100 frames:
+Measured on a Poco X7 Pro (Dimensity 8400-Ultra). Times are milliseconds per frame (preprocessing + inference + decoding),
+averaged over 17-240 frames per cell:
 
-| Model (switch button) | Input | File size | Time per frame | ~FPS |
-|---|---|---|---|---|
-| `yolo11n` | 640 | 10 MB | 130-160 ms | 6-8 |
-| `yolo11s` | 640 | 36 MB | ~390 ms | 2.5 |
-| `yolo11s_480` | 480 | 36 MB | ~250 ms | 4 |
-| `yolo11s_384` | 384 | 36 MB | ~165 ms | 6 |
+| Model | Input | File size | XNNPACK (CPU, 4 threads) | NNAPI (fp32) | **NNAPI fp16 (default)** |
+|---|---|---|---|---|---|
+| `yolo11n` | 640 | 10 MB | 157 | 244 | 160 |
+| `yolo11s` | 640 | 36 MB | 398 | 358 | **223** (~4.5 FPS) |
+| `yolo11s_480` | 480 | 36 MB | 219 | 232 | **165** (~6 FPS) |
 
-- Switching from the default CPU provider to XNNPACK made no meaningful difference on this phone.
-- Time scales with the number of input pixels, so a smaller input is the most effective speed-up. The cost is accuracy on small objects.
+- NNAPI with FP16 is the fastest option for the larger models (about 1.75x faster than XNNPACK for `yolo11s`). For `yolo11n` it makes no difference.
+- NNAPI in fp32 is not worth it: it is slower than XNNPACK for the small model.
+- FP16 can change confidences slightly compared with fp32; judge accuracy visually in the app.
+- Time scales with the number of input pixels, so a smaller input is the next most effective speed-up. The cost is accuracy on small objects.
+- NNAPI support varies a lot between phones and drivers. If it fails to load, the app falls back to XNNPACK automatically.
 - Numbers vary with scene, phone temperature and background load; treat them as ballparks.
 - Every frame also logs its time: `adb logcat -s Inference:D`.
 

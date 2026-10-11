@@ -12,7 +12,9 @@ import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -43,7 +45,7 @@ import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.min
 
 /** ONNX models bundled in assets (without the `.onnx` extension). */
-private val MODELS = listOf("yolo11n", "yolo11s", "yolo11s_480", "yolo11s_384")
+private val MODELS = listOf("yolo11n", "yolo11s", "yolo11s_480")
 
 @Composable
 fun CameraScreen(contentPadding: PaddingValues = PaddingValues()) {
@@ -56,14 +58,19 @@ fun CameraScreen(contentPadding: PaddingValues = PaddingValues()) {
     val previewView = remember {
         PreviewView(context).apply { scaleType = PreviewView.ScaleType.FIT_CENTER }
     }
-    // The analyzer thread reloads the detector when the requested model changes.
+    // The analyzer thread reloads the detector when the requested model or provider changes.
     val requestedModel = remember { AtomicReference(MODELS.first()) }
+    val requestedProvider = remember { AtomicReference(Provider.NNAPI_FP16) }
     var modelLabel by remember { mutableStateOf(MODELS.first()) }
+    var providerLabel by remember { mutableStateOf(Provider.NNAPI_FP16) }
+    // Provider actually in use (NNAPI may fall back to XNNPACK).
+    var activeProvider by remember { mutableStateOf(Provider.NNAPI_FP16) }
 
     DisposableEffect(lifecycleOwner) {
         val executor = Executors.newSingleThreadExecutor()
         var detector: YoloDetector? = null
         var loadedModel = ""
+        var loadedProvider: Provider? = null
         val providerFuture = ProcessCameraProvider.getInstance(context)
         providerFuture.addListener({
             val provider = providerFuture.get()
@@ -85,13 +92,16 @@ fun CameraScreen(contentPadding: PaddingValues = PaddingValues()) {
                         Bitmap.createBitmap(raw, 0, 0, raw.width, raw.height, m, true)
                     }
                     val wanted = requestedModel.get()
-                    if (wanted != loadedModel) {
+                    val wantedProvider = requestedProvider.get()
+                    if (wanted != loadedModel || wantedProvider != loadedProvider) {
                         detector?.close()
-                        detector = YoloDetector(context, "$wanted.onnx")
+                        detector = YoloDetector(context, "$wanted.onnx", wantedProvider)
                         loadedModel = wanted
+                        loadedProvider = wantedProvider
+                        activeProvider = detector!!.provider
                     }
                     val r = detector!!.detect(upright)
-                    Log.d("Inference", "$loadedModel ${r.inferenceMs} ms")
+                    Log.d("Inference", "$loadedModel ${activeProvider.name} ${r.inferenceMs} ms")
                     frameAspect = upright.width.toFloat() / upright.height
                     result = r
                 }
@@ -112,19 +122,27 @@ fun CameraScreen(contentPadding: PaddingValues = PaddingValues()) {
         AndroidView(factory = { previewView }, modifier = Modifier.fillMaxSize())
         DetectionOverlay(result.detections, frameAspect, Modifier.fillMaxSize())
         Text(
-            text = "$modelLabel · ${result.detections.size} objects · ${result.inferenceMs} ms",
+            text = "$modelLabel · ${activeProvider.label} · ${result.detections.size} objects · ${result.inferenceMs} ms",
             color = Color.White,
             style = MaterialTheme.typography.titleMedium,
             modifier = Modifier.align(Alignment.TopStart).padding(8.dp),
         )
-        Button(
-            onClick = {
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            modifier = Modifier.align(Alignment.BottomCenter).padding(16.dp),
+        ) {
+            Button(onClick = {
                 val next = MODELS[(MODELS.indexOf(modelLabel) + 1) % MODELS.size]
                 modelLabel = next
                 requestedModel.set(next)
-            },
-            modifier = Modifier.align(Alignment.BottomCenter).padding(16.dp),
-        ) { Text("Switch model") }
+            }) { Text("Switch model") }
+            Button(onClick = {
+                val all = Provider.entries
+                val next = all[(all.indexOf(providerLabel) + 1) % all.size]
+                providerLabel = next
+                requestedProvider.set(next)
+            }) { Text("Switch provider") }
+        }
     }
 }
 
