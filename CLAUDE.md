@@ -59,8 +59,9 @@ The x86_64 emulator needs CPU virtualization. Initially it was off; it is now en
 - [x] Model/runtime chosen: YOLO11n in ONNX format + ONNX Runtime Mobile (`onnxruntime-android`, CPU, 4 threads)
 - [x] Camera access (CameraX 1.4.0 + runtime CAMERA permission, `MainActivity.kt`)
 - [x] Inference on camera frames + box/label overlay (`CameraScreen.kt`, `YoloDetector.kt`, `YoloPostProcessor.kt`); unit tests pass
-- [ ] Verify on the physical phone (Poco X7 Pro, HyperOS): install was blocked with INSTALL_FAILED_USER_RESTRICTED.
-      Enable Developer options > "Install via USB" (and "USB debugging (Security settings)"), keep the phone unlocked, retry `installDebug`.
+- [x] Verified on the physical phone (Poco X7 Pro, HyperOS) on 2026-10-12: boxes align with the preview, detects tv/book/remote;
+      ~127 ms per frame (~8 FPS) on CPU with 4 threads. If `installDebug` gives INSTALL_FAILED_USER_RESTRICTED, enable
+      Developer options > "Install via USB" and accept the prompt on the phone.
 - [ ] Try NNAPI/XNNPACK providers, INT8 quantization, YOLO11s
 
 ## Model
