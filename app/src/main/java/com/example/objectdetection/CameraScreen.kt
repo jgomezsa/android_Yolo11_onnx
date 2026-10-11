@@ -36,8 +36,13 @@ import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import androidx.compose.material3.Button
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.min
+
+/** ONNX models bundled in assets (without the `.onnx` extension). */
+private val MODELS = listOf("yolo11n", "yolo11s")
 
 @Composable
 fun CameraScreen(contentPadding: PaddingValues = PaddingValues()) {
@@ -50,10 +55,14 @@ fun CameraScreen(contentPadding: PaddingValues = PaddingValues()) {
     val previewView = remember {
         PreviewView(context).apply { scaleType = PreviewView.ScaleType.FIT_CENTER }
     }
+    // The analyzer thread reloads the detector when the requested model changes.
+    val requestedModel = remember { AtomicReference(MODELS.first()) }
+    var modelLabel by remember { mutableStateOf(MODELS.first()) }
 
     DisposableEffect(lifecycleOwner) {
         val executor = Executors.newSingleThreadExecutor()
-        val detector = YoloDetector(context)
+        var detector: YoloDetector? = null
+        var loadedModel = ""
         val providerFuture = ProcessCameraProvider.getInstance(context)
         providerFuture.addListener({
             val provider = providerFuture.get()
@@ -74,7 +83,13 @@ fun CameraScreen(contentPadding: PaddingValues = PaddingValues()) {
                         val m = Matrix().apply { postRotate(it.imageInfo.rotationDegrees.toFloat()) }
                         Bitmap.createBitmap(raw, 0, 0, raw.width, raw.height, m, true)
                     }
-                    val r = detector.detect(upright)
+                    val wanted = requestedModel.get()
+                    if (wanted != loadedModel) {
+                        detector?.close()
+                        detector = YoloDetector(context, "$wanted.onnx")
+                        loadedModel = wanted
+                    }
+                    val r = detector!!.detect(upright)
                     frameAspect = upright.width.toFloat() / upright.height
                     result = r
                 }
@@ -87,7 +102,7 @@ fun CameraScreen(contentPadding: PaddingValues = PaddingValues()) {
             ProcessCameraProvider.getInstance(context).get().unbindAll()
             executor.shutdown()
             executor.awaitTermination(2, java.util.concurrent.TimeUnit.SECONDS)
-            detector.close()
+            detector?.close()
         }
     }
 
@@ -95,11 +110,19 @@ fun CameraScreen(contentPadding: PaddingValues = PaddingValues()) {
         AndroidView(factory = { previewView }, modifier = Modifier.fillMaxSize())
         DetectionOverlay(result.detections, frameAspect, Modifier.fillMaxSize())
         Text(
-            text = "${result.detections.size} objects · ${result.inferenceMs} ms",
+            text = "$modelLabel · ${result.detections.size} objects · ${result.inferenceMs} ms",
             color = Color.White,
             style = MaterialTheme.typography.titleMedium,
             modifier = Modifier.align(Alignment.TopStart).padding(8.dp),
         )
+        Button(
+            onClick = {
+                val next = MODELS[(MODELS.indexOf(modelLabel) + 1) % MODELS.size]
+                modelLabel = next
+                requestedModel.set(next)
+            },
+            modifier = Modifier.align(Alignment.BottomCenter).padding(16.dp),
+        ) { Text("Switch model") }
     }
 }
 

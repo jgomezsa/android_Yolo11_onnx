@@ -62,7 +62,9 @@ The x86_64 emulator needs CPU virtualization. Initially it was off; it is now en
 - [x] Verified on the physical phone (Poco X7 Pro, HyperOS) on 2026-10-12: boxes align with the preview, detects tv/book/remote;
       ~127 ms per frame (~8 FPS) on CPU with 4 threads. If `installDebug` gives INSTALL_FAILED_USER_RESTRICTED, enable
       Developer options > "Install via USB" and accept the prompt on the phone.
-- [ ] Try NNAPI/XNNPACK providers, INT8 quantization, YOLO11s
+- [x] YOLO11s added (`yolo11s.onnx`, 36 MB) with an in-app "Switch model" button (`MODELS` in `CameraScreen.kt`).
+      Poco X7 Pro, CPU 4 threads: 11n ~130-170 ms, 11s ~350 ms per frame.
+- [ ] Try NNAPI/XNNPACK providers, INT8 quantization, lower input size
 
 ## Model
 - `app/src/main/assets/yolo11n.onnx` (10 MB), exported with:
