@@ -82,10 +82,16 @@ CameraX ImageAnalysis (RGBA_8888, STRATEGY_KEEP_ONLY_LATEST, 4:3)
   -> detector-specific tensor (NHWC float for LiteRT, NCHW float for ONNX Runtime), RGB 0..1
   -> model -> [1, 84, N]  (cx, cy, w, h in model pixels + 80 class scores per anchor)
   -> YoloPostProcessor.decode: best class per anchor, score > 0.25, class-aware NMS (IoU 0.45), map back to normalized source coordinates
-  -> Compose Canvas overlay above the PreviewView (FIT_CENTER; the overlay computes the same fitted rectangle)
+  -> ShownFrame(bitmap, detections) published to Compose state; FrameView draws that same bitmap letterboxed on a Canvas and the boxes on top
 ```
 
-Analysis and preview both use a 4:3 `ResolutionSelector`, so normalized coordinates of the analysis frame map directly onto the fitted preview rectangle.
+There is no CameraX `Preview` use case: the picture on screen is the analysed frame itself. Earlier versions showed the live preview with boxes from an older frame,
+which made boxes trail moving objects by roughly 100-150 ms (frame time + queueing). Drawing the bitmap and its own detections together removes that mismatch (as in
+the recorded video); the cost is that the picture updates at the detection rate (about 10-12 fps) instead of 30 fps, and the box-to-picture delay is gone but the
+picture itself is still about one frame time old.
+The analysis `ResolutionSelector` is 4:3 with a 1280x960 target (`ANALYSIS_WIDTH` / `ANALYSIS_HEIGHT`, closest lower otherwise), because that frame is also what is
+shown and recorded. Measured on the Poco X7 Pro (GPU, yolo11s): at the default 640x480 the frame took about 70 ms (pre 4-6 ms); at 1280x960 about 90-100 ms
+(pre 7-9 ms; the extra time is `toBitmap()` and the rotation), model time unchanged at about 60 ms. At 640x480 the picture was visibly blurry once scaled to the screen.
 Everything in the analyzer runs on one single-thread executor; results are published to Compose state.
 
 ### 5.2 Components (`app/src/main/java/com/example/objectdetection/`)
@@ -130,7 +136,7 @@ and ignores warm-up frames.
 - `FrameTimePlot` is a small line plot of the last 50 frame times (`FRAME_HISTORY`). Gray axes, two labelled ticks on the vertical axis (auto-scaled
   maximum from `FrameTimeHistory.niceMax`, and half of it), no horizontal ticks. The history is cleared when a model is (re)loaded.
 - Bottom-left: `ProcessingButton` ("Stop" with `ic_stop.xml` / "Start" with `ic_play.xml`), shown after loading. It flips `processing` (UI state) and `processingFlag`
-  (`AtomicBoolean` read by the analyzer thread). While paused the analyzer returns before converting the frame, so no CPU/GPU is spent; the camera preview keeps running,
+  (`AtomicBoolean` read by the analyzer thread). While paused the analyzer only converts and shows the frame (no model run, so the GPU is idle); the picture stays live,
   the boxes are hidden, the detector stays loaded (resuming is instant) and the plot keeps its last values.
 - Bottom-left, next to Stop/Start: `RecordButton` (red dot + "Record"; while recording a red square + elapsed m:ss; dimmed while paused). See 5.5.
 - Top-right: `GpuBadge`, shown after loading: a chip icon (`res/drawable/ic_chip.xml`, tinted) with "GPU" (teal) when the model runs on the GPU or "No GPU" (amber) otherwise.
@@ -144,8 +150,8 @@ analysis frame, rounded down to even) and finishes it on the first frame after t
 encoder's input `Surface` (`lockHardwareCanvas`, then `DetectionRenderer`), so boxes always match their frame. Frames are timestamped when drawn, so the video plays at the
 real detection rate (about 8-15 fps). H.264, bit rate `width * height * 4`, key frame every second, no audio, nothing but the camera image and boxes (no plot or buttons).
 
-- Resolution is the analysis resolution (CameraX default 4:3, 480x640 upright on the Poco X7 Pro), not the preview resolution. A sharper video would need a larger analysis
-  size, which makes `toBitmap()` and preprocessing slower. About 0.15 MB per second of video at that size.
+- Resolution is the analysis resolution (1280x960, so 960x1280 upright; it was 480x640 with the CameraX default, about 0.15 MB per second of video; measure again at the
+  new size). It is exactly what is shown on screen.
 - Android 10+: written to `Movies/ObjectDetection` through `MediaStore` (pending until finished, deleted if empty), no permission needed. Older versions: the app's own
   external Movies folder (not shown in the gallery).
 - Pausing detection, closing the screen composable or an encoder error ends the recording. A toast tells the user where the video was saved.

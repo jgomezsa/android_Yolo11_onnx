@@ -81,11 +81,11 @@ Every camera frame goes through the same steps:
 
 ```
 Camera frame -> resize and pad to a square -> AI model on the GPU -> raw predictions
-             -> keep the confident ones, remove duplicates -> boxes drawn over the preview
+             -> keep the confident ones, remove duplicates -> boxes drawn over the same picture
 ```
 
-1. **Camera.** CameraX delivers two streams: the live preview you see, and a stream of frames for analysis. If the analysis falls behind it
-   simply skips frames, so the preview never lags.
+1. **Camera.** CameraX delivers a stream of frames. The picture on screen is the very frame that was analysed, so the boxes always match what
+   you see, even on moving objects. If the analysis falls behind, camera frames are simply skipped.
 2. **Preparation.** The model expects a square 640x640 picture. The frame is rotated upright and scaled to fit inside the square, and the
    unused space is filled with grey so nothing is stretched. The pixels are converted to numbers between 0 and 1.
 3. **The model.** It is [YOLO11](https://docs.ultralytics.com/models/yolo11/) "small", a neural network trained on the COCO dataset. In one pass it looks at the
@@ -94,7 +94,7 @@ Camera frame -> resize and pad to a square -> AI model on the GPU -> raw predict
 4. **Cleaning up the result** (`YoloPostProcessor`). Candidates scoring below 25% are dropped. Often several boxes cover the same object, so
    the best one is kept and the others that overlap it by more than 45% are discarded (*non-maximum suppression*, applied per class).
    The surviving boxes are mapped back from the padded square to the real camera picture.
-5. **Drawing.** The boxes and labels are painted on a Compose canvas laid over the camera preview.
+5. **Drawing.** The boxes and labels are painted on a Compose canvas on top of the analysed camera picture.
 
 Some details that keep it fast and robust:
 
@@ -111,7 +111,7 @@ Some details that keep it fast and robust:
 | File | Role |
 |---|---|
 | `MainActivity.kt` | Edge-to-edge Compose host and the camera permission request |
-| `CameraScreen.kt` | CameraX preview and analysis, picks and falls back between detectors, draws the boxes |
+| `CameraScreen.kt` | CameraX analysis and the on-screen picture, picks and falls back between detectors, draws the boxes |
 | `ObjectDetector.kt` | Common interface for the detectors, and the code that pads a frame into the square model input |
 | `LiteRtDetector.kt` | The GPU detector (LiteRT, `.tflite` models) with the program cache |
 | `YoloDetector.kt` | The fallback detector (ONNX Runtime, `.onnx` models) |

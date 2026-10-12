@@ -3,15 +3,15 @@ package com.example.objectdetection
 import android.graphics.Bitmap
 import android.graphics.Matrix
 import android.util.Log
+import android.util.Size
 import android.widget.Toast
 import androidx.camera.core.AspectRatio
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
-import androidx.camera.core.Preview
 import androidx.camera.core.resolutionselector.AspectRatioStrategy
 import androidx.camera.core.resolutionselector.ResolutionSelector
+import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
-import androidx.camera.view.PreviewView
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -48,7 +48,6 @@ import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
@@ -61,6 +60,10 @@ const val DEFAULT_MODEL = "yolo11s"
 /** Cheaper model to switch to automatically when the default one runs below [MIN_FPS]. */
 private val FALLBACK_MODEL = mapOf("yolo11s" to "yolo11s_480")
 private const val MIN_FPS = 3.0
+
+/** Camera analysis size (landscape 4:3). It is also what is shown on screen and recorded, so it sets the picture sharpness. */
+private const val ANALYSIS_WIDTH = 1280
+private const val ANALYSIS_HEIGHT = 960
 
 /** Number of recent frames shown in the processing-time plot. */
 private const val FRAME_HISTORY = 50
@@ -94,18 +97,14 @@ fun CameraScreen(
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     var result by remember { mutableStateOf(DetectionResult(emptyList(), 0)) }
-    // Aspect ratio (w/h) of the upright analysis frame, used to align the overlay with the preview.
-    var frameAspect by remember { mutableStateOf(3f / 4f) }
-
-    val previewView = remember {
-        PreviewView(context).apply { scaleType = PreviewView.ScaleType.FIT_CENTER }
-    }
+    // The frame on screen together with the detections computed on that very frame, so boxes never lag behind the picture.
+    var shown by remember { mutableStateOf<ShownFrame?>(null) }
     // The analyzer thread reloads the detector when the requested model changes.
     val requestedModel = remember { AtomicReference(initialModel) }
     var loading by remember { mutableStateOf(true) }
     var usingGpu by remember { mutableStateOf(false) }
     var frameTimes by remember { mutableStateOf(emptyList<Long>()) }
-    // When false the camera preview keeps running but frames are skipped (no detection, no boxes).
+    // When false the camera image keeps updating but frames are not analysed (no detection, no boxes).
     var processing by remember { mutableStateOf(true) }
     val processingFlag = remember { AtomicBoolean(true) }
     // Video recording: the UI sets the flag, the analyzer thread starts/stops the recorder and reports the elapsed time.
@@ -138,9 +137,8 @@ fun CameraScreen(
             val provider = providerFuture.get()
             val selector = ResolutionSelector.Builder()
                 .setAspectRatioStrategy(AspectRatioStrategy(AspectRatio.RATIO_4_3, AspectRatioStrategy.FALLBACK_RULE_AUTO))
+                .setResolutionStrategy(ResolutionStrategy(Size(ANALYSIS_WIDTH, ANALYSIS_HEIGHT), ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER))
                 .build()
-            val preview = Preview.Builder().setResolutionSelector(selector).build()
-                .also { it.surfaceProvider = previewView.surfaceProvider }
             val analysis = ImageAnalysis.Builder()
                 .setResolutionSelector(selector)
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
@@ -148,19 +146,22 @@ fun CameraScreen(
                 .build()
             analysis.setAnalyzer(executor) { image ->
                 image.use {
-                    if (!processingFlag.get()) {
-                        stopRecording()
-                        return@use
-                    }
                     val frameStart = System.nanoTime()
                     val raw = it.toBitmap()
                     val upright = if (it.imageInfo.rotationDegrees == 0) raw else {
                         val m = Matrix().apply { postRotate(it.imageInfo.rotationDegrees.toFloat()) }
                         Bitmap.createBitmap(raw, 0, 0, raw.width, raw.height, m, true)
                     }
+                    if (!processingFlag.get()) {
+                        // Paused: keep the picture live, without boxes.
+                        stopRecording()
+                        shown = ShownFrame(upright, emptyList())
+                        return@use
+                    }
                     val wanted = requestedModel.get()
                     if (wanted != loadedModel) {
-                        // Accelerators compile the model on creation, which can take many seconds.
+                        // Accelerators compile the model on creation, which can take many seconds; show the picture meanwhile.
+                        shown = ShownFrame(upright, emptyList())
                         loading = true
                         val loadStart = System.nanoTime()
                         detector?.close()
@@ -180,7 +181,7 @@ fun CameraScreen(
                         "$loadedModel ${activeProvider.name} ${r.inferenceMs} ms " +
                             "(pre ${r.preprocessMs}, run ${r.runMs}, post ${r.postMs}) frame $frameMs ms",
                     )
-                    frameAspect = upright.width.toFloat() / upright.height
+                    shown = ShownFrame(upright, r.detections)
                     result = r
                     history.add(r.inferenceMs)
                     frameTimes = history.snapshot()
@@ -212,7 +213,7 @@ fun CameraScreen(
                 }
             }
             provider.unbindAll()
-            provider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis)
+            provider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, analysis)
         }, ContextCompat.getMainExecutor(context))
 
         onDispose {
@@ -224,9 +225,8 @@ fun CameraScreen(
         }
     }
 
-    Box(modifier = Modifier.fillMaxSize().padding(contentPadding)) {
-        AndroidView(factory = { previewView }, modifier = Modifier.fillMaxSize())
-        if (processing) DetectionOverlay(result.detections, frameAspect, Modifier.fillMaxSize())
+    Box(modifier = Modifier.fillMaxSize().padding(contentPadding).background(Color.Black)) {
+        shown?.let { FrameView(it, Modifier.fillMaxSize()) }
         Row(
             modifier = Modifier.align(Alignment.TopStart).padding(8.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -388,19 +388,25 @@ private fun GpuBadge(usingGpu: Boolean, modifier: Modifier = Modifier) {
     }
 }
 
+/** An analysed camera frame (upright) and the detections computed on it. */
+private class ShownFrame(val bitmap: Bitmap, val detections: List<Detection>)
+
+/** Draws the frame letterboxed in the available space, with its boxes on top. */
 @Composable
-private fun DetectionOverlay(detections: List<Detection>, frameAspect: Float, modifier: Modifier = Modifier) {
+private fun FrameView(frame: ShownFrame, modifier: Modifier = Modifier) {
     val renderer = remember { DetectionRenderer() }
+    val paint = remember { android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG) }
 
     Canvas(modifier = modifier) {
-        // The preview is letterboxed (FIT_CENTER); compute the rectangle the frame occupies.
-        val fit = min(size.width / frameAspect, size.height)
-        val frameH = fit
-        val frameW = fit * frameAspect
+        val aspect = frame.bitmap.width.toFloat() / frame.bitmap.height
+        val frameH = min(size.width / aspect, size.height)
+        val frameW = frameH * aspect
         val originX = (size.width - frameW) / 2f
         val originY = (size.height - frameH) / 2f
 
-        renderer.draw(drawContext.canvas.nativeCanvas, detections, originX, originY, frameW, frameH)
+        val canvas = drawContext.canvas.nativeCanvas
+        canvas.drawBitmap(frame.bitmap, null, android.graphics.RectF(originX, originY, originX + frameW, originY + frameH), paint)
+        renderer.draw(canvas, frame.detections, originX, originY, frameW, frameH)
     }
 }
 
