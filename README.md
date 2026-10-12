@@ -67,7 +67,7 @@ You can also open the folder in Android Studio and press Run.
 
 1. Open **Object Detection** and allow the **Camera** permission.
 2. Point the camera at objects. Each one gets a coloured box with its name and a confidence percentage.
-3. The number in the top-left corner is how long the last frame took to process, in milliseconds. The lower it is, the smoother the detection.
+3. The number in the top-left corner is how long the last frame took to process, in milliseconds. The lower it is, the smoother the detection. The small graph below it shows the same time for the last 50 frames.
 4. The chip icon in the top-right corner tells you whether the phone's GPU is doing the work (teal **GPU**) or the app had to fall back to another way of running (amber **No GPU**, slower).
 
 There is nothing to configure: the app picks the best way to run on your phone by itself.
@@ -114,6 +114,7 @@ Some details that keep it fast and robust:
 | `LiteRtDetector.kt` | The GPU detector (LiteRT, `.tflite` models) with the program cache |
 | `YoloDetector.kt` | The fallback detector (ONNX Runtime, `.onnx` models) |
 | `YoloPostProcessor.kt` | Turns the model's raw output into boxes: thresholds, overlap removal, coordinate mapping (unit tested) |
+| `FrameTimeHistory.kt` | Keeps the last 50 frame times for the graph (unit tested) |
 | `FpsMonitor.kt` | Decides when the phone is too slow and the lighter model is needed (unit tested) |
 | `CocoLabels.kt` | The 80 class names |
 | `app/src/main/assets/` | The bundled models: `yolo11s` and the lighter `yolo11s_480`, each in `.tflite` (GPU) and `.onnx` (fallback) form |

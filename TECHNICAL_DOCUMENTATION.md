@@ -93,7 +93,8 @@ Everything in the analyzer runs on one single-thread executor; results are publi
 | File | Role |
 |---|---|
 | `MainActivity.kt` | Edge-to-edge host (`enableEdgeToEdge()`, `Scaffold` with `innerPadding` on the root), CAMERA permission gate, reads the `model` / `provider` launch extras |
-| `CameraScreen.kt` | CameraX setup, analyzer loop, `createDetector` fallback chain, automatic switch to the lighter model, overlay drawing, top-left frame time, top-right `GpuBadge` |
+| `CameraScreen.kt` | CameraX setup, analyzer loop, `createDetector` fallback chain, automatic switch to the lighter model, overlay drawing, top-left frame time and `FrameTimePlot`, top-right `GpuBadge` |
+| `FrameTimeHistory.kt` | Ring buffer of the last 50 frame times plus `niceMax` (auto-scaled top tick of the plot; pure Kotlin, unit tested) |
 | `ObjectDetector.kt` | `ObjectDetector` interface, `Provider` enum (`LITERT_GPU`, `NNAPI_FP16`, `NNAPI`, `XNNPACK`; `isGpu`), `DetectionResult` (with phase timings), `LetterboxRenderer` |
 | `LiteRtDetector.kt` | LiteRT `CompiledModel` on the GPU (fp16 precision, program cache); input size derived from the model's input tensor |
 | `YoloDetector.kt` | ONNX Runtime session with NNAPI fp16 / NNAPI / XNNPACK options; input size read from the model |
@@ -122,6 +123,8 @@ and ignores warm-up frames.
 ### 5.4 User interface rules
 
 - Top-left: the frame processing time in ms (`result.inferenceMs`, i.e. preprocess + model + decode), or "Loading…" while the detector is being created.
+- Under the time: `FrameTimePlot`, a small line plot of the last 50 frame times (`FRAME_HISTORY`). Gray axes, two labelled ticks on the vertical axis (auto-scaled
+  maximum from `FrameTimeHistory.niceMax`, and half of it), no horizontal ticks. The history is cleared when a model is (re)loaded.
 - Top-right: `GpuBadge`, shown after loading: a chip icon (`res/drawable/ic_chip.xml`, tinted) with "GPU" (teal) when the model runs on the GPU or "No GPU" (amber) otherwise.
 - The user is never shown which model or provider is used, and there are no model/provider controls.
 - Edge-to-edge with `Scaffold`; `innerPadding` is applied to the root composable.
@@ -200,7 +203,8 @@ Milliseconds per frame = preprocess + model + decode, from the `Inference` log; 
 - CPU use: XNNPACK burns about 3 cores for the model; with NNAPI or the GPU the whole app (camera, preprocessing, decoding, UI) uses under 1 core
   (measured from `/proc/<pid>/stat` utime+stime over 10 s).
 - XNNPACK vs the default ORT CPU provider made no difference.
-- Requirement from the product owner: model load time must be under 5 s. Met by the GPU path only.
+- Requirement from the product owner: model load time must be under 5 s on every launch after the first. The first (cold) load may take longer if later loads
+  are fast thanks to a cache. The GPU path caches its compiled programs (cold 2-4 s, cached 0.2 s); NNAPI via ORT cannot cache, so it pays its 6-29 s on every start.
 - Numbers vary with scene, temperature and background load; the phone was often charging and warm.
 
 ## 8. Icons
@@ -226,7 +230,7 @@ Design notes: a plain tab above a box reads as a folder, so the tags are pointed
 
 ## 9. Testing
 
-`.\gradlew.bat test` runs the JVM unit tests: `YoloPostProcessorTest` (letterbox, decode, NMS, IoU), `FpsMonitorTest` (threshold, warm-up, reset), `ProviderTest` (`isGpu`).
+`.\gradlew.bat test` runs the JVM unit tests: `YoloPostProcessorTest` (letterbox, decode, NMS, IoU), `FpsMonitorTest` (threshold, warm-up, reset), `FrameTimeHistoryTest` (window, `niceMax`), `ProviderTest` (`isGpu`).
 Detection quality and speed are checked on the phone with `adb logcat` and screenshots. Add a unit test for any new logic.
 
 ## 10. Licensing

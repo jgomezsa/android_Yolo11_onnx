@@ -14,6 +14,7 @@ import androidx.camera.view.PreviewView
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -36,13 +37,16 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import java.util.concurrent.Executors
@@ -55,6 +59,9 @@ const val DEFAULT_MODEL = "yolo11s"
 /** Cheaper model to switch to automatically when the default one runs below [MIN_FPS]. */
 private val FALLBACK_MODEL = mapOf("yolo11s" to "yolo11s_480")
 private const val MIN_FPS = 3.0
+
+/** Number of recent frames shown in the processing-time plot. */
+private const val FRAME_HISTORY = 50
 
 /**
  * Loads [model] with [provider]. Fallback chain when the preferred provider cannot run the model:
@@ -95,10 +102,12 @@ fun CameraScreen(
     val requestedModel = remember { AtomicReference(initialModel) }
     var loading by remember { mutableStateOf(true) }
     var usingGpu by remember { mutableStateOf(false) }
+    var frameTimes by remember { mutableStateOf(emptyList<Long>()) }
 
     DisposableEffect(lifecycleOwner) {
         val executor = Executors.newSingleThreadExecutor()
         val fpsMonitor = FpsMonitor(MIN_FPS)
+        val history = FrameTimeHistory(FRAME_HISTORY)
         var detector: ObjectDetector? = null
         var loadedModel = ""
         // Provider actually in use (a requested one may have fallen back); only logged, the user never sees it.
@@ -135,6 +144,7 @@ fun CameraScreen(
                         activeProvider = detector!!.provider
                         usingGpu = activeProvider.isGpu
                         fpsMonitor.reset()
+                        history.clear()
                         loading = false
                         Log.d("Inference", "loaded $wanted ${activeProvider.name} in ${(System.nanoTime() - loadStart) / 1_000_000} ms")
                     }
@@ -147,6 +157,8 @@ fun CameraScreen(
                     )
                     frameAspect = upright.width.toFloat() / upright.height
                     result = r
+                    history.add(r.inferenceMs)
+                    frameTimes = history.snapshot()
                     // Too slow on the default model: drop to the cheaper one (once, only downwards).
                     val fallback = FALLBACK_MODEL[loadedModel]
                     if (fallback != null && fpsMonitor.record(frameMs)) {
@@ -170,13 +182,63 @@ fun CameraScreen(
     Box(modifier = Modifier.fillMaxSize().padding(contentPadding)) {
         AndroidView(factory = { previewView }, modifier = Modifier.fillMaxSize())
         DetectionOverlay(result.detections, frameAspect, Modifier.fillMaxSize())
-        Text(
-            text = if (loading) "Loading…" else "${result.inferenceMs} ms",
-            color = Color.White,
-            style = MaterialTheme.typography.titleMedium,
-            modifier = Modifier.align(Alignment.TopStart).padding(8.dp),
-        )
+        Column(modifier = Modifier.align(Alignment.TopStart).padding(8.dp)) {
+            Text(
+                text = if (loading) "Loading…" else "${result.inferenceMs} ms",
+                color = Color.White,
+                style = MaterialTheme.typography.titleMedium,
+            )
+            if (!loading && frameTimes.size > 1) FrameTimePlot(frameTimes, Modifier.padding(top = 4.dp))
+        }
         if (!loading) GpuBadge(usingGpu, Modifier.align(Alignment.TopEnd).padding(8.dp))
+    }
+}
+
+/**
+ * Tiny line plot of the last frame times: gray axes, two labelled ticks on the vertical axis (top = auto-scaled maximum,
+ * and half of it), none on the horizontal axis. The line grows from the left until [FRAME_HISTORY] frames are shown.
+ */
+@Composable
+private fun FrameTimePlot(times: List<Long>, modifier: Modifier = Modifier) {
+    val density = LocalDensity.current
+    val labelPaint = remember(density) {
+        android.graphics.Paint().apply {
+            color = android.graphics.Color.LTGRAY
+            textSize = with(density) { 10.sp.toPx() }
+            textAlign = android.graphics.Paint.Align.RIGHT
+            isAntiAlias = true
+        }
+    }
+    val axis = Color(0xFF9CA3AF)
+    Canvas(
+        modifier = modifier
+            .size(width = 130.dp, height = 56.dp)
+            .background(Color(0x66000000), RoundedCornerShape(6.dp)),
+    ) {
+        val top = 8.dp.toPx()
+        val bottom = size.height - 6.dp.toPx()
+        val left = 30.dp.toPx()
+        val right = size.width - 6.dp.toPx()
+        val max = FrameTimeHistory.niceMax(times.max())
+        fun y(ms: Float) = bottom - (bottom - top) * ms / max
+
+        drawLine(axis, Offset(left, top), Offset(left, bottom), strokeWidth = 1.dp.toPx())
+        drawLine(axis, Offset(left, bottom), Offset(right, bottom), strokeWidth = 1.dp.toPx())
+        val tick = 3.dp.toPx()
+        val textOffset = labelPaint.textSize / 3f
+        for (value in longArrayOf(max, max / 2)) {
+            val ty = y(value.toFloat())
+            drawLine(axis, Offset(left - tick, ty), Offset(left, ty), strokeWidth = 1.dp.toPx())
+            drawContext.canvas.nativeCanvas.drawText("$value", left - tick - 2.dp.toPx(), ty + textOffset, labelPaint)
+        }
+
+        val path = Path()
+        times.forEachIndexed { i, ms ->
+            val x = left + (right - left) * i / (FRAME_HISTORY - 1)
+            val py = y(ms.toFloat())
+            if (i == 0) path.moveTo(x, py) else path.lineTo(x, py)
+        }
+        drawPath(path, Color.White, style = Stroke(width = 1.5.dp.toPx()))
     }
 }
 
