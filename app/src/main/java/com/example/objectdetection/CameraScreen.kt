@@ -12,10 +12,17 @@ import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -34,6 +41,7 @@ import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
@@ -86,6 +94,7 @@ fun CameraScreen(
     // The analyzer thread reloads the detector when the requested model changes.
     val requestedModel = remember { AtomicReference(initialModel) }
     var loading by remember { mutableStateOf(true) }
+    var usingGpu by remember { mutableStateOf(false) }
 
     DisposableEffect(lifecycleOwner) {
         val executor = Executors.newSingleThreadExecutor()
@@ -124,6 +133,7 @@ fun CameraScreen(
                         detector = createDetector(context, wanted, initialProvider)
                         loadedModel = wanted
                         activeProvider = detector!!.provider
+                        usingGpu = activeProvider.isGpu
                         fpsMonitor.reset()
                         loading = false
                         Log.d("Inference", "loaded $wanted ${activeProvider.name} in ${(System.nanoTime() - loadStart) / 1_000_000} ms")
@@ -166,6 +176,28 @@ fun CameraScreen(
             style = MaterialTheme.typography.titleMedium,
             modifier = Modifier.align(Alignment.TopStart).padding(8.dp),
         )
+        if (!loading) GpuBadge(usingGpu, Modifier.align(Alignment.TopEnd).padding(8.dp))
+    }
+}
+
+/** A small chip icon with a label: teal "GPU" when the model runs on the GPU, amber "No GPU" when it fell back. */
+@Composable
+private fun GpuBadge(usingGpu: Boolean, modifier: Modifier = Modifier) {
+    val color = if (usingGpu) Color(0xFF2DD4BF) else Color(0xFFFBBF24)
+    Row(
+        modifier = modifier
+            .background(Color(0x99000000), RoundedCornerShape(16.dp))
+            .padding(horizontal = 10.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            painter = painterResource(R.drawable.ic_chip),
+            contentDescription = if (usingGpu) "Running on the GPU" else "Not running on the GPU",
+            tint = color,
+            modifier = Modifier.size(20.dp),
+        )
+        Spacer(Modifier.width(6.dp))
+        Text(if (usingGpu) "GPU" else "No GPU", color = color, style = MaterialTheme.typography.labelLarge)
     }
 }
 

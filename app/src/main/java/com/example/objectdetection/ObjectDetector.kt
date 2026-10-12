@@ -16,7 +16,10 @@ enum class Provider(val label: String) {
     NNAPI_FP16("NNAPI fp16"),
 
     /** LiteRT (TensorFlow Lite) on the GPU, with a compiled-program cache. Needs a `.tflite` model. */
-    LITERT_GPU("LiteRT GPU"),
+    LITERT_GPU("LiteRT GPU");
+
+    /** True when the model runs on the GPU (the only provider known to do so; NNAPI may pick any accelerator). */
+    val isGpu: Boolean get() = this == LITERT_GPU
 }
 
 data class DetectionResult(
