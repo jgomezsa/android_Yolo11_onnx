@@ -6,6 +6,7 @@ import android.util.Log
 import android.util.Size
 import android.widget.Toast
 import androidx.camera.core.AspectRatio
+import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.resolutionselector.AspectRatioStrategy
@@ -15,12 +16,18 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -42,6 +49,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLifecycleOwner
@@ -53,6 +61,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.min
+import kotlin.math.roundToInt
 
 /** Model used by default (asset name without extension: `yolo11s.onnx` / `yolo11s.tflite`). */
 const val DEFAULT_MODEL = "yolo11s"
@@ -111,6 +120,23 @@ fun CameraScreen(
     var recording by remember { mutableStateOf(false) }
     var recordedMs by remember { mutableStateOf(0L) }
     val recordFlag = remember { AtomicBoolean(false) }
+    // Name of the model that is loaded, shown top-right.
+    var modelName by remember { mutableStateOf("") }
+    // Zoom: the stops this camera offers (empty = no zoom control) and the current ratio. Plain State objects so gesture handlers always see the latest values.
+    val cameraRef = remember { AtomicReference<Camera?>(null) }
+    val zoomPoints = remember { mutableStateOf(emptyList<Float>()) }
+    val zoomRatio = remember { mutableStateOf(1f) }
+    val setZoom = remember {
+        { ratio: Float ->
+            val points = zoomPoints.value
+            val camera = cameraRef.get()
+            if (camera != null && points.size >= 2) {
+                val target = ratio.coerceIn(points.first(), points.last())
+                zoomRatio.value = target
+                camera.cameraControl.setZoomRatio(target)
+            }
+        }
+    }
 
     DisposableEffect(lifecycleOwner) {
         val executor = Executors.newSingleThreadExecutor()
@@ -169,6 +195,7 @@ fun CameraScreen(
                         loadedModel = wanted
                         activeProvider = detector!!.provider
                         usingGpu = activeProvider.isGpu
+                        modelName = modelDisplayName(loadedModel)
                         fpsMonitor.reset()
                         history.clear()
                         loading = false
@@ -213,7 +240,19 @@ fun CameraScreen(
                 }
             }
             provider.unbindAll()
-            provider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, analysis)
+            // Among the back cameras, take the one that can zoom out the furthest (a logical camera that includes the ultrawide lens, if the
+            // phone exposes one); otherwise this is just the default back camera.
+            val widestBack = CameraSelector.Builder()
+                .requireLensFacing(CameraSelector.LENS_FACING_BACK)
+                .addCameraFilter { infos -> listOfNotNull(infos.minByOrNull { it.zoomState.value?.minZoomRatio ?: 1f }) }
+                .build()
+            val camera = provider.bindToLifecycle(lifecycleOwner, widestBack, analysis)
+            cameraRef.set(camera)
+            camera.cameraInfo.zoomState.value?.let { zoom ->
+                zoomPoints.value = ZoomPresets.forRange(zoom.minZoomRatio, zoom.maxZoomRatio)
+                zoomRatio.value = zoom.zoomRatio.coerceAtLeast(1f)
+                Log.d("Inference", "zoom range ${zoom.minZoomRatio}..${zoom.maxZoomRatio}, stops ${zoomPoints.value}")
+            }
         }, ContextCompat.getMainExecutor(context))
 
         onDispose {
@@ -225,30 +264,56 @@ fun CameraScreen(
         }
     }
 
-    Box(modifier = Modifier.fillMaxSize().padding(contentPadding).background(Color.Black)) {
-        shown?.let { FrameView(it, Modifier.fillMaxSize()) }
-        Row(
-            modifier = Modifier.align(Alignment.TopStart).padding(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            if (!loading && frameTimes.size > 1) {
-                FrameTimePlot(frameTimes)
-                Spacer(Modifier.width(8.dp))
-            }
-            Text(
-                text = when {
-                    loading -> "Loading…"
-                    !processing -> "Paused"
-                    else -> "${result.inferenceMs} ms"
+    Column(modifier = Modifier.fillMaxSize().padding(contentPadding).background(Color.Black)) {
+        // The picture and its overlays; pinching here zooms the camera.
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .pointerInput(Unit) {
+                    detectTransformGestures { _, _, zoom, _ -> if (zoom != 1f) setZoom(zoomRatio.value * zoom) }
                 },
-                color = Color.White,
-                style = MaterialTheme.typography.titleMedium,
-            )
-        }
-        if (!loading) {
-            GpuBadge(usingGpu, Modifier.align(Alignment.TopEnd).padding(8.dp))
+        ) {
+            shown?.let { FrameView(it, Modifier.fillMaxSize()) }
             Row(
-                modifier = Modifier.align(Alignment.BottomStart).padding(16.dp),
+                modifier = Modifier.align(Alignment.TopStart).padding(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (!loading && frameTimes.size > 1) {
+                    FrameTimePlot(frameTimes)
+                    Spacer(Modifier.width(8.dp))
+                }
+                Text(
+                    text = when {
+                        loading -> "Loading…"
+                        !processing -> "Paused"
+                        else -> "${result.inferenceMs} ms"
+                    },
+                    color = Color.White,
+                    style = MaterialTheme.typography.titleMedium,
+                )
+            }
+            if (!loading) {
+                Column(
+                    modifier = Modifier.align(Alignment.TopEnd).padding(8.dp),
+                    horizontalAlignment = Alignment.End,
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Text(modelName, color = Color.White, style = MaterialTheme.typography.titleMedium)
+                    GpuBadge(usingGpu)
+                }
+            }
+        }
+        // Controls below the picture, never on top of it.
+        Column(
+            modifier = Modifier.fillMaxWidth().height(120.dp).padding(horizontal = 16.dp),
+            verticalArrangement = Arrangement.Center,
+        ) {
+            if (!loading && zoomPoints.value.size >= 2) {
+                ZoomSelector(zoomPoints.value, zoomRatio.value, onChange = setZoom)
+            }
+            if (!loading) Row(
+                modifier = Modifier.padding(top = 6.dp),
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 ProcessingButton(processing, onClick = {
@@ -272,6 +337,58 @@ fun CameraScreen(
                 )
             }
         }
+    }
+}
+
+/**
+ * Minimal zoom control: a thin line with a dot and label per zoom stop (evenly spaced) and a white thumb at the current zoom.
+ * Tap to jump to the nearest stop, drag to slide; the thumb also follows pinch-to-zoom.
+ */
+@Composable
+private fun ZoomSelector(points: List<Float>, ratio: Float, onChange: (Float) -> Unit, modifier: Modifier = Modifier) {
+    val density = LocalDensity.current
+    val labelPaint = remember(density) {
+        android.graphics.Paint().apply {
+            textSize = with(density) { 12.sp.toPx() }
+            textAlign = android.graphics.Paint.Align.CENTER
+            isAntiAlias = true
+        }
+    }
+    val line = Color(0xFF9CA3AF)
+    val position = ZoomPresets.position(points, ratio)
+    val active = (position * (points.size - 1)).roundToInt()
+
+    Canvas(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(44.dp)
+            .pointerInput(points) {
+                val pad = 28.dp.toPx()
+                detectTapGestures { tap ->
+                    val fraction = (tap.x - pad) / (size.width - 2 * pad)
+                    onChange(ZoomPresets.nearestStop(points, fraction))
+                }
+            }
+            .pointerInput(points) {
+                val pad = 28.dp.toPx()
+                detectHorizontalDragGestures { change, _ ->
+                    val fraction = (change.position.x - pad) / (size.width - 2 * pad)
+                    onChange(ZoomPresets.ratioAt(points, fraction))
+                }
+            },
+    ) {
+        val pad = 28.dp.toPx()
+        val left = pad
+        val width = size.width - 2 * pad
+        val lineY = size.height - 10.dp.toPx()
+        drawLine(line, Offset(left, lineY), Offset(left + width, lineY), strokeWidth = 1.5.dp.toPx())
+        points.forEachIndexed { i, stop ->
+            val x = left + width * i / (points.size - 1)
+            drawCircle(line, radius = 3.dp.toPx(), center = Offset(x, lineY))
+            labelPaint.color = if (i == active) android.graphics.Color.WHITE else android.graphics.Color.LTGRAY
+            drawContext.canvas.nativeCanvas.drawText(ZoomPresets.label(stop), x, lineY - 14.dp.toPx(), labelPaint)
+        }
+        drawCircle(Color.White, radius = 7.dp.toPx(), center = Offset(left + width * position, lineY))
     }
 }
 

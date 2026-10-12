@@ -99,7 +99,9 @@ Everything in the analyzer runs on one single-thread executor; results are publi
 | File | Role |
 |---|---|
 | `MainActivity.kt` | Edge-to-edge host (`enableEdgeToEdge()`, `Scaffold` with `innerPadding` on the root), CAMERA permission gate, reads the `model` / `provider` launch extras |
-| `CameraScreen.kt` | CameraX setup, analyzer loop, `createDetector` fallback chain, automatic switch to the lighter model, overlay drawing, top-left frame time and `FrameTimePlot`, top-right `GpuBadge` |
+| `CameraScreen.kt` | CameraX setup, analyzer loop, `createDetector` fallback chain, automatic switch to the lighter model, overlay drawing, top-left frame time and `FrameTimePlot`, top-right model name and `GpuBadge`, bottom controls and `ZoomSelector` |
+| `ZoomPresets.kt` | Zoom stops from the camera's range, selector position/ratio mapping, labels (pure Kotlin, unit tested) |
+| `ModelName.kt` | `modelDisplayName`, the model name shown top-right (unit tested in `ZoomPresetsTest`) |
 | `FrameTimeHistory.kt` | Ring buffer of the last 50 frame times plus `niceMax` (auto-scaled top tick of the plot; pure Kotlin, unit tested) |
 | `DetectionRenderer.kt` | Draws boxes and labels on a native `Canvas` (sizes scale with the frame width); used by the on-screen overlay and by the recorder |
 | `VideoRecorder.kt` | Records analysed frames plus boxes to an H.264 MP4 (`MediaCodec` surface input, `MediaMuxer`, saved through `MediaStore`) |
@@ -139,8 +141,20 @@ and ignores warm-up frames.
   (`AtomicBoolean` read by the analyzer thread). While paused the analyzer only converts and shows the frame (no model run, so the GPU is idle); the picture stays live,
   the boxes are hidden, the detector stays loaded (resuming is instant) and the plot keeps its last values.
 - Bottom-left, next to Stop/Start: `RecordButton` (red dot + "Record"; while recording a red square + elapsed m:ss; dimmed while paused). See 5.5.
-- Top-right: `GpuBadge`, shown after loading: a chip icon (`res/drawable/ic_chip.xml`, tinted) with "GPU" (teal) when the model runs on the GPU or "No GPU" (amber) otherwise.
-- The user is never shown which model or provider is used, and there are no model/provider controls.
+- Top-right, a column shown after loading: the model name (`modelDisplayName`: `yolo11s` -> "YOLO11s", `yolo11s_480` -> "YOLO11s 480"), and below it `GpuBadge`: a chip icon
+  (`res/drawable/ic_chip.xml`, tinted) with "GPU" (teal) when the model runs on the GPU or "No GPU" (amber) otherwise.
+- The provider name is never shown (only the GPU / No GPU badge), and there are no model/provider controls.
+- Layout: a `Column` with the picture and its overlays in a weighted `Box` on top, and a fixed 120 dp control strip below it (zoom selector, then Stop/Record), so the
+  controls never cover the image. The picture is letterboxed inside the Box; the plot, time, model name and badge sit in the Box's corners.
+- Zoom (`ZoomPresets.kt`): the stops come from the camera's own zoom range (`cameraInfo.zoomState`): its minimum when below 1x, 1x, then 2x, 5x, 10x up to the maximum;
+  fewer than two stops hides the control. `ZoomSelector` is a thin line with a dot and label per stop (evenly spaced) and a white thumb at the current ratio; tap snaps to
+  the nearest stop, dragging slides continuously, and pinching on the picture (`detectTransformGestures`) multiplies the ratio. All three call `setZoom`, which clamps to the
+  stops' range and calls `cameraControl.setZoomRatio`; the thumb position is interpolated between stops. The camera is chosen with a `CameraSelector` filter that takes the
+  back camera with the lowest minimum zoom ratio (a logical camera including the ultrawide lens, where the phone exposes one). The analysis frame follows the zoom, so boxes,
+  picture and recorded video all show the zoomed image.
+- Poco X7 Pro: `dumpsys media.camera` lists a logical back camera with zoom 0.6-10 (ultrawide + main), but CameraX only gets two back cameras with 1-10 (HyperOS does not
+  expose the 0.6 camera to third-party apps), so the stops are 1x, 2x, 5x, 10x (all digital above 1x, no telephoto lens). Logcat prints `zoom range a..b, stops [...]`.
+  Pinch-to-zoom was not tested on the device (adb cannot send two-finger gestures); tap and drag were.
 - Edge-to-edge with `Scaffold`; `innerPadding` is applied to the root composable.
 
 ### 5.5 Video recording
@@ -258,7 +272,7 @@ Design notes: a plain tab above a box reads as a folder, so the tags are pointed
 
 ## 9. Testing
 
-`.\gradlew.bat test` runs the JVM unit tests: `YoloPostProcessorTest` (letterbox, decode, NMS, IoU), `FpsMonitorTest` (threshold, warm-up, reset), `FrameTimeHistoryTest` (window, `niceMax`), `RecordingFormatTest` (even size, bit rate, file name, elapsed time), `ProviderTest` (`isGpu`).
+`.\gradlew.bat test` runs the JVM unit tests: `YoloPostProcessorTest` (letterbox, decode, NMS, IoU), `FpsMonitorTest` (threshold, warm-up, reset), `FrameTimeHistoryTest` (window, `niceMax`), `RecordingFormatTest` (even size, bit rate, file name, elapsed time), `ZoomPresetsTest` (stops per range, selector mapping, labels, model names), `ProviderTest` (`isGpu`).
 Detection quality and speed are checked on the phone with `adb logcat` and screenshots. Add a unit test for any new logic.
 
 ## 10. Licensing
