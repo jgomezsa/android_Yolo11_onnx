@@ -3,6 +3,7 @@ package com.example.objectdetection
 import android.graphics.Bitmap
 import android.graphics.Matrix
 import android.util.Log
+import android.widget.Toast
 import androidx.camera.core.AspectRatio
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
@@ -14,6 +15,7 @@ import androidx.camera.view.PreviewView
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -34,13 +36,12 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.nativeCanvas
-import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLifecycleOwner
@@ -107,6 +108,10 @@ fun CameraScreen(
     // When false the camera preview keeps running but frames are skipped (no detection, no boxes).
     var processing by remember { mutableStateOf(true) }
     val processingFlag = remember { AtomicBoolean(true) }
+    // Video recording: the UI sets the flag, the analyzer thread starts/stops the recorder and reports the elapsed time.
+    var recording by remember { mutableStateOf(false) }
+    var recordedMs by remember { mutableStateOf(0L) }
+    val recordFlag = remember { AtomicBoolean(false) }
 
     DisposableEffect(lifecycleOwner) {
         val executor = Executors.newSingleThreadExecutor()
@@ -116,6 +121,18 @@ fun CameraScreen(
         var loadedModel = ""
         // Provider actually in use (a requested one may have fallen back); only logged, the user never sees it.
         var activeProvider = initialProvider
+        var recorder: VideoRecorder? = null
+        val mainExecutor = ContextCompat.getMainExecutor(context)
+        fun toast(message: String) = mainExecutor.execute { Toast.makeText(context, message, Toast.LENGTH_LONG).show() }
+        fun stopRecording(announce: Boolean = true) {
+            val rec = recorder ?: return
+            recorder = null
+            recordFlag.set(false)
+            recording = false
+            val saved = rec.finish()
+            Log.d("Inference", "recording finished, saved=$saved")
+            if (announce) toast(if (saved) "Video saved to Movies/ObjectDetection" else "Nothing was recorded")
+        }
         val providerFuture = ProcessCameraProvider.getInstance(context)
         providerFuture.addListener({
             val provider = providerFuture.get()
@@ -131,7 +148,10 @@ fun CameraScreen(
                 .build()
             analysis.setAnalyzer(executor) { image ->
                 image.use {
-                    if (!processingFlag.get()) return@use
+                    if (!processingFlag.get()) {
+                        stopRecording()
+                        return@use
+                    }
                     val frameStart = System.nanoTime()
                     val raw = it.toBitmap()
                     val upright = if (it.imageInfo.rotationDegrees == 0) raw else {
@@ -164,6 +184,25 @@ fun CameraScreen(
                     result = r
                     history.add(r.inferenceMs)
                     frameTimes = history.snapshot()
+                    if (recordFlag.get()) {
+                        try {
+                            val rec = recorder ?: VideoRecorder(
+                                context,
+                                RecordingFormat.evenSize(upright.width),
+                                RecordingFormat.evenSize(upright.height),
+                            ).also { recorder = it }
+                            rec.addFrame(upright, r.detections)
+                            recordedMs = rec.elapsedMs
+                        } catch (e: Exception) {
+                            Log.e("Inference", "Recording failed", e)
+                            runCatching { stopRecording(announce = false) }
+                            recordFlag.set(false)
+                            recording = false
+                            toast("Recording failed")
+                        }
+                    } else {
+                        stopRecording()
+                    }
                     // Too slow on the default model: drop to the cheaper one (once, only downwards).
                     val fallback = FALLBACK_MODEL[loadedModel]
                     if (fallback != null && fpsMonitor.record(frameMs)) {
@@ -180,6 +219,7 @@ fun CameraScreen(
             ProcessCameraProvider.getInstance(context).get().unbindAll()
             executor.shutdown()
             executor.awaitTermination(2, java.util.concurrent.TimeUnit.SECONDS)
+            runCatching { stopRecording() }
             detector?.close()
         }
     }
@@ -207,14 +247,30 @@ fun CameraScreen(
         }
         if (!loading) {
             GpuBadge(usingGpu, Modifier.align(Alignment.TopEnd).padding(8.dp))
-            ProcessingButton(
-                processing,
-                onClick = {
+            Row(
+                modifier = Modifier.align(Alignment.BottomStart).padding(16.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                ProcessingButton(processing, onClick = {
                     processing = !processing
                     processingFlag.set(processing)
-                },
-                modifier = Modifier.align(Alignment.BottomStart).padding(16.dp),
-            )
+                    // Pausing also ends a recording (the analyzer thread saves it on the next frame).
+                    if (!processing) {
+                        recordFlag.set(false)
+                        recording = false
+                    }
+                })
+                RecordButton(
+                    recording = recording,
+                    elapsedMs = recordedMs,
+                    enabled = processing,
+                    onClick = {
+                        recording = !recording
+                        if (recording) recordedMs = 0
+                        recordFlag.set(recording)
+                    },
+                )
+            }
         }
     }
 }
@@ -288,6 +344,29 @@ private fun ProcessingButton(processing: Boolean, onClick: () -> Unit, modifier:
     }
 }
 
+/** Starts or stops recording the video with the boxes: a red dot and "Record", or a red square and the elapsed time while recording. */
+@Composable
+private fun RecordButton(recording: Boolean, elapsedMs: Long, enabled: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier) {
+    val red = Color(0xFFF87171)
+    Row(
+        modifier = modifier
+            .alpha(if (enabled) 1f else 0.4f)
+            .background(Color(0x99000000), RoundedCornerShape(24.dp))
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            painter = painterResource(if (recording) R.drawable.ic_stop else R.drawable.ic_record),
+            contentDescription = if (recording) "Stop recording" else "Start recording",
+            tint = red,
+            modifier = Modifier.size(24.dp),
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(if (recording) RecordingFormat.elapsed(elapsedMs) else "Record", color = Color.White, style = MaterialTheme.typography.labelLarge)
+    }
+}
+
 /** A small chip icon with a label: teal "GPU" when the model runs on the GPU, amber "No GPU" when it fell back. */
 @Composable
 private fun GpuBadge(usingGpu: Boolean, modifier: Modifier = Modifier) {
@@ -311,14 +390,7 @@ private fun GpuBadge(usingGpu: Boolean, modifier: Modifier = Modifier) {
 
 @Composable
 private fun DetectionOverlay(detections: List<Detection>, frameAspect: Float, modifier: Modifier = Modifier) {
-    val textPaint = remember {
-        android.graphics.Paint().apply {
-            color = android.graphics.Color.WHITE
-            textSize = 42f
-            isAntiAlias = true
-        }
-    }
-    val bgPaint = remember { android.graphics.Paint().apply { style = android.graphics.Paint.Style.FILL } }
+    val renderer = remember { DetectionRenderer() }
 
     Canvas(modifier = modifier) {
         // The preview is letterboxed (FIT_CENTER); compute the rectangle the frame occupies.
@@ -328,24 +400,7 @@ private fun DetectionOverlay(detections: List<Detection>, frameAspect: Float, mo
         val originX = (size.width - frameW) / 2f
         val originY = (size.height - frameH) / 2f
 
-        for (d in detections) {
-            val color = Color.hsv((d.classId * 47 % 360).toFloat(), 0.85f, 1f)
-            val left = originX + d.left * frameW
-            val top = originY + d.top * frameH
-            drawRect(
-                color = color,
-                topLeft = Offset(left, top),
-                size = Size((d.right - d.left) * frameW, (d.bottom - d.top) * frameH),
-                style = Stroke(width = 4f),
-            )
-            val text = "${d.label} ${(d.score * 100).toInt()}%"
-            val textW = textPaint.measureText(text)
-            bgPaint.color = color.copy(alpha = 0.8f).toArgb()
-            drawContext.canvas.nativeCanvas.apply {
-                drawRect(left, top - 52f, left + textW + 16f, top, bgPaint)
-                drawText(text, left + 8f, top - 12f, textPaint)
-            }
-        }
+        renderer.draw(drawContext.canvas.nativeCanvas, detections, originX, originY, frameW, frameH)
     }
 }
 

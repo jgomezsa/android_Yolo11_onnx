@@ -95,6 +95,9 @@ Everything in the analyzer runs on one single-thread executor; results are publi
 | `MainActivity.kt` | Edge-to-edge host (`enableEdgeToEdge()`, `Scaffold` with `innerPadding` on the root), CAMERA permission gate, reads the `model` / `provider` launch extras |
 | `CameraScreen.kt` | CameraX setup, analyzer loop, `createDetector` fallback chain, automatic switch to the lighter model, overlay drawing, top-left frame time and `FrameTimePlot`, top-right `GpuBadge` |
 | `FrameTimeHistory.kt` | Ring buffer of the last 50 frame times plus `niceMax` (auto-scaled top tick of the plot; pure Kotlin, unit tested) |
+| `DetectionRenderer.kt` | Draws boxes and labels on a native `Canvas` (sizes scale with the frame width); used by the on-screen overlay and by the recorder |
+| `VideoRecorder.kt` | Records analysed frames plus boxes to an H.264 MP4 (`MediaCodec` surface input, `MediaMuxer`, saved through `MediaStore`) |
+| `RecordingFormat.kt` | Pure helpers for recording: even sizes, bit rate, file name, m:ss time (unit tested) |
 | `ObjectDetector.kt` | `ObjectDetector` interface, `Provider` enum (`LITERT_GPU`, `NNAPI_FP16`, `NNAPI`, `XNNPACK`; `isGpu`), `DetectionResult` (with phase timings), `LetterboxRenderer` |
 | `LiteRtDetector.kt` | LiteRT `CompiledModel` on the GPU (fp16 precision, program cache); input size derived from the model's input tensor |
 | `YoloDetector.kt` | ONNX Runtime session with NNAPI fp16 / NNAPI / XNNPACK options; input size read from the model |
@@ -129,11 +132,26 @@ and ignores warm-up frames.
 - Bottom-left: `ProcessingButton` ("Stop" with `ic_stop.xml` / "Start" with `ic_play.xml`), shown after loading. It flips `processing` (UI state) and `processingFlag`
   (`AtomicBoolean` read by the analyzer thread). While paused the analyzer returns before converting the frame, so no CPU/GPU is spent; the camera preview keeps running,
   the boxes are hidden, the detector stays loaded (resuming is instant) and the plot keeps its last values.
+- Bottom-left, next to Stop/Start: `RecordButton` (red dot + "Record"; while recording a red square + elapsed m:ss; dimmed while paused). See 5.5.
 - Top-right: `GpuBadge`, shown after loading: a chip icon (`res/drawable/ic_chip.xml`, tinted) with "GPU" (teal) when the model runs on the GPU or "No GPU" (amber) otherwise.
 - The user is never shown which model or provider is used, and there are no model/provider controls.
 - Edge-to-edge with `Scaffold`; `innerPadding` is applied to the root composable.
 
-### 5.5 Logging
+### 5.5 Video recording
+
+The UI toggles `recordFlag` (`AtomicBoolean`); the analyzer thread owns the `VideoRecorder`: it creates it on the first frame after the flag is set (size = the upright
+analysis frame, rounded down to even) and finishes it on the first frame after the flag clears. After each detection the same bitmap and its detections are drawn onto the
+encoder's input `Surface` (`lockHardwareCanvas`, then `DetectionRenderer`), so boxes always match their frame. Frames are timestamped when drawn, so the video plays at the
+real detection rate (about 8-15 fps). H.264, bit rate `width * height * 4`, key frame every second, no audio, nothing but the camera image and boxes (no plot or buttons).
+
+- Resolution is the analysis resolution (CameraX default 4:3, 480x640 upright on the Poco X7 Pro), not the preview resolution. A sharper video would need a larger analysis
+  size, which makes `toBitmap()` and preprocessing slower. About 0.15 MB per second of video at that size.
+- Android 10+: written to `Movies/ObjectDetection` through `MediaStore` (pending until finished, deleted if empty), no permission needed. Older versions: the app's own
+  external Movies folder (not shown in the gallery).
+- Pausing detection, closing the screen composable or an encoder error ends the recording. A toast tells the user where the video was saved.
+- Logcat: `recording started WxH`, `recording finished, saved=<bool>`.
+
+### 5.6 Logging
 
 Tag `Inference`: `loaded <model> <PROVIDER> in N ms` once per load, and per frame `<model> <PROVIDER> T ms (pre a, run b, post c) frame F ms`.
 Warnings for provider fallbacks and for the automatic switch to the lighter model.
@@ -234,7 +252,7 @@ Design notes: a plain tab above a box reads as a folder, so the tags are pointed
 
 ## 9. Testing
 
-`.\gradlew.bat test` runs the JVM unit tests: `YoloPostProcessorTest` (letterbox, decode, NMS, IoU), `FpsMonitorTest` (threshold, warm-up, reset), `FrameTimeHistoryTest` (window, `niceMax`), `ProviderTest` (`isGpu`).
+`.\gradlew.bat test` runs the JVM unit tests: `YoloPostProcessorTest` (letterbox, decode, NMS, IoU), `FpsMonitorTest` (threshold, warm-up, reset), `FrameTimeHistoryTest` (window, `niceMax`), `RecordingFormatTest` (even size, bit rate, file name, elapsed time), `ProviderTest` (`isGpu`).
 Detection quality and speed are checked on the phone with `adb logcat` and screenshots. Add a unit test for any new logic.
 
 ## 10. Licensing

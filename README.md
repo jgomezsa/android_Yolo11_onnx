@@ -70,6 +70,7 @@ You can also open the folder in Android Studio and press Run.
 3. The number in the top-left corner is how long the last frame took to process, in milliseconds. The lower it is, the smoother the detection. The small graph to its left shows the same time for the last 50 frames.
 4. The chip icon in the top-right corner tells you whether the phone's GPU is doing the work (teal **GPU**) or the app had to fall back to another way of running (amber **No GPU**, slower).
 5. The **Stop** button in the bottom-left corner pauses the detection (the camera keeps showing the live view, and no boxes are drawn). Press **Start** to resume.
+6. The **Record** button next to it saves a video of what the camera sees, with the boxes drawn on. While recording it shows the elapsed time; press it again to stop. The video is saved in the **Movies/ObjectDetection** folder of your phone (it also shows up in your gallery). Pausing the detection also ends the recording.
 
 There is nothing to configure: the app picks the best way to run on your phone by itself.
 The first start after installing takes a few seconds (the top-left corner says "Loading..."); later starts are almost instant.
@@ -115,6 +116,9 @@ Some details that keep it fast and robust:
 | `LiteRtDetector.kt` | The GPU detector (LiteRT, `.tflite` models) with the program cache |
 | `YoloDetector.kt` | The fallback detector (ONNX Runtime, `.onnx` models) |
 | `YoloPostProcessor.kt` | Turns the model's raw output into boxes: thresholds, overlap removal, coordinate mapping (unit tested) |
+| `VideoRecorder.kt` | Saves the video with the boxes drawn on |
+| `DetectionRenderer.kt` | Draws the boxes and labels (on screen and in the video) |
+| `RecordingFormat.kt` | Small helpers for the recording (unit tested) |
 | `FrameTimeHistory.kt` | Keeps the last 50 frame times for the graph (unit tested) |
 | `FpsMonitor.kt` | Decides when the phone is too slow and the lighter model is needed (unit tested) |
 | `CocoLabels.kt` | The 80 class names |
