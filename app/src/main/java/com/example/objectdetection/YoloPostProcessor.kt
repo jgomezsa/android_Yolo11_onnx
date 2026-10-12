@@ -57,7 +57,7 @@ object YoloPostProcessor {
     }
 
     /** Model-space corners -> normalized corners of the source image (undo padding and scale). */
-    private fun toDetection(l: Float, t: Float, r: Float, b: Float, classId: Int, score: Float, lb: Letterbox): Detection? {
+    internal fun toDetection(l: Float, t: Float, r: Float, b: Float, classId: Int, score: Float, lb: Letterbox): Detection? {
         val left = ((l - lb.padX) / lb.scale / lb.srcWidth).coerceIn(0f, 1f)
         val right = ((r - lb.padX) / lb.scale / lb.srcWidth).coerceIn(0f, 1f)
         val top = ((t - lb.padY) / lb.scale / lb.srcHeight).coerceIn(0f, 1f)

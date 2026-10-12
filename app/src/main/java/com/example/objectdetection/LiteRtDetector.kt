@@ -18,7 +18,7 @@ import kotlin.math.sqrt
  * The model must have static tensor shapes: the GPU delegate rejects dynamic ones
  * (see "Models" in the README for how to convert).
  */
-class LiteRtDetector(context: Context, modelAsset: String) : ObjectDetector {
+class LiteRtDetector(context: Context, modelAsset: String, private val family: ModelFamily = ModelFamily.YOLO11) : ObjectDetector {
     override val provider = Provider.LITERT_GPU
 
     private val env = Environment.create(context)
@@ -55,12 +55,21 @@ class LiteRtDetector(context: Context, modelAsset: String) : ObjectDetector {
         val t0 = System.nanoTime()
         val letterbox = Letterbox(bitmap.width, bitmap.height, inputSize)
         val pixels = renderer.render(bitmap, letterbox)
-        // HWC float RGB in 0..1 (TFLite models from onnx2tf are NHWC).
-        for (i in pixels.indices) {
-            val p = pixels[i]
-            input[3 * i] = ((p shr 16) and 0xFF) / 255f
-            input[3 * i + 1] = ((p shr 8) and 0xFF) / 255f
-            input[3 * i + 2] = (p and 0xFF) / 255f
+        // HWC float (TFLite models from onnx2tf are NHWC). YOLO11: RGB in 0..1. YOLOX: BGR in 0..255, as it was trained.
+        if (family == ModelFamily.YOLOX) {
+            for (i in pixels.indices) {
+                val p = pixels[i]
+                input[3 * i] = (p and 0xFF).toFloat()
+                input[3 * i + 1] = ((p shr 8) and 0xFF).toFloat()
+                input[3 * i + 2] = ((p shr 16) and 0xFF).toFloat()
+            }
+        } else {
+            for (i in pixels.indices) {
+                val p = pixels[i]
+                input[3 * i] = ((p shr 16) and 0xFF) / 255f
+                input[3 * i + 1] = ((p shr 8) and 0xFF) / 255f
+                input[3 * i + 2] = (p and 0xFF) / 255f
+            }
         }
         inputBuffers[0].writeFloat(input)
         val t1 = System.nanoTime()
@@ -69,7 +78,10 @@ class LiteRtDetector(context: Context, modelAsset: String) : ObjectDetector {
         val raw = outputBuffers[0].readFloat()
         val t2 = System.nanoTime()
 
-        val detections = YoloPostProcessor.decode(raw, raw.size / (4 + YoloPostProcessor.NUM_CLASSES), letterbox)
+        val detections = when (family) {
+            ModelFamily.YOLOX -> YoloxPostProcessor.decode(raw, inputSize, letterbox)
+            ModelFamily.YOLO11 -> YoloPostProcessor.decode(raw, raw.size / (4 + YoloPostProcessor.NUM_CLASSES), letterbox)
+        }
         val t3 = System.nanoTime()
         return DetectionResult(
             detections,

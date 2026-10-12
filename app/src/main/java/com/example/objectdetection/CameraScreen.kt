@@ -83,9 +83,12 @@ private const val FRAME_HISTORY = 50
  */
 private fun createDetector(context: android.content.Context, model: String, provider: Provider): ObjectDetector {
     if (provider == Provider.LITERT_GPU) {
+        val family = ModelFamily.of(model)
         try {
-            return LiteRtDetector(context, "$model.tflite")
+            return LiteRtDetector(context, "$model.tflite", family)
         } catch (e: Throwable) {
+            // The ONNX Runtime fallback only decodes YOLO11-style output.
+            if (family != ModelFamily.YOLO11) throw e
             Log.w("Inference", "LiteRT GPU unavailable for $model, falling back to NNAPI", e)
         }
         return YoloDetector(context, "$model.onnx", Provider.NNAPI_FP16)

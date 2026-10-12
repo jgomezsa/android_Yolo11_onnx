@@ -101,7 +101,8 @@ Everything in the analyzer runs on one single-thread executor; results are publi
 | `MainActivity.kt` | Edge-to-edge host (`enableEdgeToEdge()`, `Scaffold` with `innerPadding` on the root), CAMERA permission gate, reads the `model` / `provider` launch extras |
 | `CameraScreen.kt` | CameraX setup, analyzer loop, `createDetector` fallback chain, automatic switch to the lighter model, overlay drawing, top-left frame time and `FrameTimePlot`, top-right model name and `GpuBadge`, bottom controls and `ZoomSelector` |
 | `ZoomPresets.kt` | Zoom stops from the camera's range, selector position/ratio mapping, labels (pure Kotlin, unit tested) |
-| `ModelName.kt` | `modelDisplayName`, the model name shown top-right (unit tested in `ZoomPresetsTest`) |
+| `ModelName.kt` | `ModelFamily` (YOLO11 / YOLOX from the asset name) and `modelDisplayName`, the model name shown top-right |
+| `YoloxPostProcessor.kt` | Grid/stride decode of YOLOX's raw output, then NMS (pure Kotlin, unit tested) |
 | `FrameTimeHistory.kt` | Ring buffer of the last 50 frame times plus `niceMax` (auto-scaled top tick of the plot; pure Kotlin, unit tested) |
 | `DetectionRenderer.kt` | Draws boxes and labels on a native `Canvas` (sizes scale with the frame width); used by the on-screen overlay and by the recorder |
 | `VideoRecorder.kt` | Records analysed frames plus boxes to an H.264 MP4 (`MediaCodec` surface input, `MediaMuxer`, saved through `MediaStore`) |
@@ -217,6 +218,24 @@ uv run --python 3.12 --with onnx2tf --with tensorflow --with tf_keras --with onn
 Put the files in `assets/` and use the name (without extension) as `DEFAULT_MODEL` / in `FALLBACK_MODEL` (`CameraScreen.kt`). A model with a different number of classes needs
 `CocoLabels.kt` and `YoloPostProcessor.NUM_CLASSES` updated. Input size is read from the model, so other sizes (multiples of 32) work.
 
+### 6.3.1 YOLOX-s (Apache-2.0 alternative, opt-in)
+
+`yolox_s` runs through the same LiteRT GPU path; it is not the default. `ModelFamily.of(name)` picks the YOLOX handling for names starting with `yolox`:
+
+- **Source:** the official release ONNX `https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_s.onnx` (repo licence Apache-2.0; confirm the weights
+  terms before shipping). Input `images [1, 3, 640, 640]`, output `[1, 8400, 85]`.
+- **Convert** with the command in 6.2 (`onnx2tf -i yolox_s.onnx -o out -tb tf_converter -b 1`), then use `out/yolox_s_float32.tflite` as `assets/yolox_s.tflite`
+  (TFLite input `[1, 640, 640, 3]`, output `[1, 8400, 85]`). Host check against the ONNX output: max abs difference 5.5e-5.
+- **Input:** BGR, 0..255, no normalisation (YOLO11 is RGB 0..1); letterbox padding value 114 like YOLO11.
+- **Output:** the released ONNX is *not* decoded: per anchor `x, y` are offsets from the grid cell, `w, h` are log sizes in strides, objectness and the 80 class scores are already
+  sigmoided. `YoloxPostProcessor` decodes `(x + gx) * stride`, `exp(w) * stride`, score = objectness x class score, threshold 0.25, class-aware NMS 0.45. Anchors are the grids of
+  strides 8, 16, 32 (6400 + 1600 + 400 rows), row by row.
+- **Limits:** only the LiteRT GPU path is implemented (no ONNX Runtime fallback, no automatic lighter model). Run it with `--es model yolox_s`.
+- **Measured (Poco X7 Pro, GPU, 1280x960 analysis frames, warm phone):** cold GPU compile 1.1 s, cached load 0.17 s, model run about 60 ms (YOLO11s: cold 2-4 s, cached 0.24 s,
+  run 57-69 ms), decode under 1 ms. Published COCO AP: YOLOX-s 40.5, YOLO11s 47.0 (YOLOX trades some accuracy for the licence). On a live scene both found the main objects;
+  YOLOX also boxed people shown on a TV and a laptop screen as "tv".
+- The 36 MB `yolox_s.tflite` is not committed until the model is adopted (generate it with the steps above).
+
 ### 6.4 Tried and discarded
 
 - `yolo11n` and `yolo11s_384`: removed (not needed; 384 was judged not worth the accuracy loss).
@@ -272,13 +291,15 @@ Design notes: a plain tab above a box reads as a folder, so the tags are pointed
 
 ## 9. Testing
 
-`.\gradlew.bat test` runs the JVM unit tests: `YoloPostProcessorTest` (letterbox, decode, NMS, IoU), `FpsMonitorTest` (threshold, warm-up, reset), `FrameTimeHistoryTest` (window, `niceMax`), `RecordingFormatTest` (even size, bit rate, file name, elapsed time), `ZoomPresetsTest` (stops per range, selector mapping, labels, model names), `ProviderTest` (`isGpu`).
+`.\gradlew.bat test` runs the JVM unit tests: `YoloPostProcessorTest` (letterbox, decode, NMS, IoU), `FpsMonitorTest` (threshold, warm-up, reset), `FrameTimeHistoryTest` (window, `niceMax`), `RecordingFormatTest` (even size, bit rate, file name, elapsed time), `ZoomPresetsTest` (stops per range, selector mapping, labels, model names), `YoloxPostProcessorTest` (grid/stride decode, score, NMS, model family), `ProviderTest` (`isGpu`).
 Detection quality and speed are checked on the phone with `adb logcat` and screenshots. Add a unit test for any new logic.
 
 ## 10. Licensing
 
 - Ultralytics YOLO11 code and the pretrained weights are **AGPL-3.0**, or a paid Ultralytics Enterprise License. AGPL does not forbid commercial use, but anything that
   incorporates the weights or code must be released under AGPL with its source offered to users. A closed-source Play Store app needs the Enterprise License or a different model.
+- YOLOX-s is already supported as an opt-in model (see 6.3.1); YOLOv4 is permissive on the code side but its pretrained weights are described as demo-only, and it is heavier and
+  less accurate, so it was not tried.
 - Permissively licensed alternatives to evaluate (verify the exact weights licence first): RT-DETR, YOLOX, PP-YOLOE, D-FINE (Apache-2.0), EfficientDet-Lite and SSD-MobileNet
   (Apache-2.0, TFLite/MediaPipe), RF-DETR (Apache-2.0 for most sizes). Avoid YOLOv5/8/10/11 (AGPL), YOLOv7/v9 (GPL-3.0), YOLO-NAS (non-commercial weights).
 - Other components: CameraX, LiteRT, Compose (Apache-2.0); ONNX Runtime (MIT). COCO annotations: CC BY 4.0.
@@ -293,5 +314,8 @@ Detection quality and speed are checked on the phone with `adb logcat` and scree
 - **LiteRT 2.3 and Kotlin.** It is built with a newer Kotlin than 2.0.21; compiling works only with the skip-metadata flag in `app/build.gradle.kts`. Upgrading the Kotlin toolchain
   would remove the flag.
 - **Dynamic-shape TFLite models** make the GPU path fail and silently fall back to NNAPI; the reason is in `adb logcat -s Inference:W`.
+- **The 0.6x ultrawide camera is not offered.** `CameraManager.cameraIdList` only lists id 0 (back, zoom 1-10, no physical cameras) and id 1 (front), and CameraX only uses listed
+  cameras. On the Poco X7 Pro the characteristics of hidden ids are readable (id 2 = ultrawide 1-4, id 3 = logical camera zoom 0.6-10 over physical 0 and 2, id 4 = logical 1-10)
+  and `CameraManager.openCamera("3", ...)` succeeds, so using it would mean replacing CameraX with Camera2 (own `ImageReader`, YUV to RGB, rotation, zoom ratio); not done.
 - **First start.** The cold GPU compile takes a few seconds ("Loading…" is shown); a cleared cache brings it back.
 - Release signing is not configured; only debug builds exist.
