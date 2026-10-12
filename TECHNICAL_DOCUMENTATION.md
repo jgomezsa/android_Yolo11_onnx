@@ -122,9 +122,13 @@ and ignores warm-up frames.
 
 ### 5.4 User interface rules
 
-- Top-left: the frame processing time in ms (`result.inferenceMs`, i.e. preprocess + model + decode), or "Loading…" while the detector is being created.
-- Under the time: `FrameTimePlot`, a small line plot of the last 50 frame times (`FRAME_HISTORY`). Gray axes, two labelled ticks on the vertical axis (auto-scaled
+- Top-left, a row: `FrameTimePlot` in the corner, then to its right the frame processing time in ms (`result.inferenceMs`, i.e. preprocess + model + decode),
+  "Loading…" while the detector is being created, or "Paused".
+- `FrameTimePlot` is a small line plot of the last 50 frame times (`FRAME_HISTORY`). Gray axes, two labelled ticks on the vertical axis (auto-scaled
   maximum from `FrameTimeHistory.niceMax`, and half of it), no horizontal ticks. The history is cleared when a model is (re)loaded.
+- Bottom-left: `ProcessingButton` ("Stop" with `ic_stop.xml` / "Start" with `ic_play.xml`), shown after loading. It flips `processing` (UI state) and `processingFlag`
+  (`AtomicBoolean` read by the analyzer thread). While paused the analyzer returns before converting the frame, so no CPU/GPU is spent; the camera preview keeps running,
+  the boxes are hidden, the detector stays loaded (resuming is instant) and the plot keeps its last values.
 - Top-right: `GpuBadge`, shown after loading: a chip icon (`res/drawable/ic_chip.xml`, tinted) with "GPU" (teal) when the model runs on the GPU or "No GPU" (amber) otherwise.
 - The user is never shown which model or provider is used, and there are no model/provider controls.
 - Edge-to-edge with `Scaffold`; `innerPadding` is applied to the root composable.

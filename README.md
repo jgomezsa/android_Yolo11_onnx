@@ -67,8 +67,9 @@ You can also open the folder in Android Studio and press Run.
 
 1. Open **Object Detection** and allow the **Camera** permission.
 2. Point the camera at objects. Each one gets a coloured box with its name and a confidence percentage.
-3. The number in the top-left corner is how long the last frame took to process, in milliseconds. The lower it is, the smoother the detection. The small graph below it shows the same time for the last 50 frames.
+3. The number in the top-left corner is how long the last frame took to process, in milliseconds. The lower it is, the smoother the detection. The small graph to its left shows the same time for the last 50 frames.
 4. The chip icon in the top-right corner tells you whether the phone's GPU is doing the work (teal **GPU**) or the app had to fall back to another way of running (amber **No GPU**, slower).
+5. The **Stop** button in the bottom-left corner pauses the detection (the camera keeps showing the live view, and no boxes are drawn). Press **Start** to resume.
 
 There is nothing to configure: the app picks the best way to run on your phone by itself.
 The first start after installing takes a few seconds (the top-left corner says "Loading..."); later starts are almost instant.

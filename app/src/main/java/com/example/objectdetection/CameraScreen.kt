@@ -13,8 +13,8 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -50,6 +50,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.min
 
@@ -103,6 +104,9 @@ fun CameraScreen(
     var loading by remember { mutableStateOf(true) }
     var usingGpu by remember { mutableStateOf(false) }
     var frameTimes by remember { mutableStateOf(emptyList<Long>()) }
+    // When false the camera preview keeps running but frames are skipped (no detection, no boxes).
+    var processing by remember { mutableStateOf(true) }
+    val processingFlag = remember { AtomicBoolean(true) }
 
     DisposableEffect(lifecycleOwner) {
         val executor = Executors.newSingleThreadExecutor()
@@ -127,6 +131,7 @@ fun CameraScreen(
                 .build()
             analysis.setAnalyzer(executor) { image ->
                 image.use {
+                    if (!processingFlag.get()) return@use
                     val frameStart = System.nanoTime()
                     val raw = it.toBitmap()
                     val upright = if (it.imageInfo.rotationDegrees == 0) raw else {
@@ -181,16 +186,36 @@ fun CameraScreen(
 
     Box(modifier = Modifier.fillMaxSize().padding(contentPadding)) {
         AndroidView(factory = { previewView }, modifier = Modifier.fillMaxSize())
-        DetectionOverlay(result.detections, frameAspect, Modifier.fillMaxSize())
-        Column(modifier = Modifier.align(Alignment.TopStart).padding(8.dp)) {
+        if (processing) DetectionOverlay(result.detections, frameAspect, Modifier.fillMaxSize())
+        Row(
+            modifier = Modifier.align(Alignment.TopStart).padding(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (!loading && frameTimes.size > 1) {
+                FrameTimePlot(frameTimes)
+                Spacer(Modifier.width(8.dp))
+            }
             Text(
-                text = if (loading) "Loading…" else "${result.inferenceMs} ms",
+                text = when {
+                    loading -> "Loading…"
+                    !processing -> "Paused"
+                    else -> "${result.inferenceMs} ms"
+                },
                 color = Color.White,
                 style = MaterialTheme.typography.titleMedium,
             )
-            if (!loading && frameTimes.size > 1) FrameTimePlot(frameTimes, Modifier.padding(top = 4.dp))
         }
-        if (!loading) GpuBadge(usingGpu, Modifier.align(Alignment.TopEnd).padding(8.dp))
+        if (!loading) {
+            GpuBadge(usingGpu, Modifier.align(Alignment.TopEnd).padding(8.dp))
+            ProcessingButton(
+                processing,
+                onClick = {
+                    processing = !processing
+                    processingFlag.set(processing)
+                },
+                modifier = Modifier.align(Alignment.BottomStart).padding(16.dp),
+            )
+        }
     }
 }
 
@@ -239,6 +264,27 @@ private fun FrameTimePlot(times: List<Long>, modifier: Modifier = Modifier) {
             if (i == 0) path.moveTo(x, py) else path.lineTo(x, py)
         }
         drawPath(path, Color.White, style = Stroke(width = 1.5.dp.toPx()))
+    }
+}
+
+/** Round-cornered button that pauses or resumes the detection: shows "Stop" while processing and "Start" while paused. */
+@Composable
+private fun ProcessingButton(processing: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier) {
+    Row(
+        modifier = modifier
+            .background(Color(0x99000000), RoundedCornerShape(24.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            painter = painterResource(if (processing) R.drawable.ic_stop else R.drawable.ic_play),
+            contentDescription = null,
+            tint = Color.White,
+            modifier = Modifier.size(24.dp),
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(if (processing) "Stop" else "Start", color = Color.White, style = MaterialTheme.typography.labelLarge)
     }
 }
 
